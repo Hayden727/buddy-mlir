@@ -1,3 +1,2 @@
 *.mlir
 *.data
-extractGenericOp.py
