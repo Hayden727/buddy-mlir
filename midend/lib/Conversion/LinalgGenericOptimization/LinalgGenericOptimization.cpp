@@ -25,6 +25,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/AffineExpr.h"
@@ -55,11 +56,14 @@
 #include <string>
 #include <unordered_map>
 
+#define DEBUG_TYPE "linalg-generic-optimization"
+
 using namespace mlir;
 using namespace linalg;
 using namespace vector;
 using namespace affine;
 using namespace arith;
+using namespace math;
 using namespace memref;
 using namespace func;
 
@@ -77,8 +81,10 @@ public:
   }
 
   LogicalResult
-  matchAndRewrite(GenericOp op, OpAdaptor adaptor,
+  matchAndRewrite(Operation *op, ArrayRef<Value> operands,
                   ConversionPatternRewriter &rewriter) const override {
+
+    auto genericOp = cast<GenericOp>(op);
 
     // 步骤1: 获取硬件配置
     HardwareVectorizationConfig hwConfig = getHardwareVectorizationConfig();
@@ -90,11 +96,11 @@ public:
     if (!hwAdvice.isVectorizationRecommended) {
       LLVM_DEBUG(llvm::dbgs() << "Vectorization not recommended for this hardware: " 
                              << hwAdvice.reason << "\n");
-      return failure();
+    return failure();
     }
 
     // 步骤4: 提取迭代器类型
-    auto iteratorTypes = extractIteratorTypes(op);
+    auto iteratorTypes = extractIteratorTypes(genericOp);
     if (iteratorTypes.empty()) {
       return failure(); // 无法提取迭代器类型
     }
@@ -104,7 +110,7 @@ public:
     }
 
     // 步骤5: 分析索引映射
-    auto indexingMaps = extractIndexingMaps(op);
+    auto indexingMaps = extractIndexingMaps(genericOp);
     if (indexingMaps.empty()) {
       return failure(); // 无法提取索引映射
     }
@@ -114,27 +120,33 @@ public:
     }
 
     // 步骤6: 分析操作
-    auto operationAnalysis = analyzeOperations(op);
+    auto operationAnalysis = analyzeOperations(genericOp);
     if (!operationAnalysis.isVectorizable) {
       LLVM_DEBUG(llvm::dbgs() << "Operations not suitable for vectorization: " 
                              << operationAnalysis.reason << "\n");
       return failure();
     }
 
-    // 步骤7: 分析数据依赖
-    auto dependencyAnalysis = analyzeDataDependencies(op);
-    if (!dependencyAnalysis.isVectorizable) {
-      LLVM_DEBUG(llvm::dbgs() << "Data dependencies prevent vectorization: " 
-                             << dependencyAnalysis.reason << "\n");
+    // 步骤7: 分析区域操作
+    auto regionAnalysis = analyzeRegionOperations(genericOp);
+    if (!regionAnalysis.allOpsVectorizable) {
+      LLVM_DEBUG(llvm::dbgs() << "Region operations not suitable for vectorization\n");
+      return failure();
+    }
+
+    // 步骤8: 分析数据依赖
+    auto dependencyAnalysis = analyzeDependencies(genericOp, regionAnalysis);
+    if (!dependencyAnalysis.isVectorizationSafe) {
+      LLVM_DEBUG(llvm::dbgs() << "Data dependencies prevent vectorization\n");
       return failure();
     }
 
     // 所有检查通过，开始向量化转换
-    return performVectorization(op, adaptor, rewriter, hwConfig, hwAdvice);
+    return performVectorization(genericOp, operands, rewriter, hwConfig, hwAdvice);
   }
 
 private:
-  std::unordered_map<Operation *, Operation *> isVectorizableOpsCache;
+  mutable std::unordered_map<Operation *, Operation *> isVectorizableOpsCache;
   
   // 向量操作类型枚举
   enum class VectorOpType {
@@ -147,7 +159,7 @@ private:
   };
   
   // 向量化操作映射表
-  std::unordered_map<StringRef, VectorOpType> vectorizableOpsMap;
+  DenseMap<StringRef, VectorOpType> vectorizableOpsMap;
 
   // 初始化向量化操作映射表
   void initializeVectorizableOpsMap() {
@@ -167,7 +179,7 @@ private:
   }
 
   // 标量arith和math操作到vector方言操作的映射表
-  std::unordered_map<StringRef, StringRef> scalarToVectorOpMap = {
+  DenseMap<StringRef, StringRef> scalarToVectorOpMap = {
       // arith
       {"arith.addf", "vector.add"},
       {"arith.subf", "vector.sub"},
@@ -318,8 +330,8 @@ private:
     }
 
     // 分离输入和输出映射
-    size_t numInputs = op.getNumInputs();
-    size_t numOutputs = op.getNumOutputs();
+    size_t numInputs = op.getNumDpsInputs();
+    size_t numOutputs = op.getNumDpsInits();
     
     // 提取输入映射
     for (size_t i = 0; i < numInputs; ++i) {
@@ -346,44 +358,22 @@ private:
     return analysis;
   }
 
-  // 检查映射是否连续
+  // 检查映射是否连续（适合向量化）
   bool isContinuousMapping(AffineMap map) const {
-    // 检查是否为恒等映射或简单的线性映射
-    if (map.isIdentity()) {
+    MappingType type = analyzeMappingType(map);
+    // 恒等映射和转置映射是连续的
+    if (type == MappingType::Identity || type == MappingType::Transpose) {
       return true;
     }
-
-    // 检查是否为简单的线性映射 (i, j) -> (i, j) 或 (i, j) -> (j, i)
-    if (map.getNumDims() == 2 && map.getNumResults() == 2) {
-      auto results = map.getResults();
-      if (results.size() == 2) {
-        // 检查是否为 (i, j) -> (i, j) 或 (i, j) -> (j, i)
-        auto first = results[0].dyn_cast<AffineDimExpr>();
-        auto second = results[1].dyn_cast<AffineDimExpr>();
-        if (first && second) {
-          return true; // 简单的维度重排
-        }
-      }
+    // 广播映射在某些情况下是连续的
+    if (type == MappingType::Broadcast) {
+      return isBroadcastContinuous(map);
     }
-
-    // 检查是否为简单的偏移映射 (i, j) -> (i + c, j + d)
-    for (auto result : map.getResults()) {
-      if (auto binOp = result.dyn_cast<AffineBinaryOpExpr>()) {
-        if (binOp.getKind() == AffineExprKind::Add) {
-          auto lhs = binOp.getLHS().dyn_cast<AffineDimExpr>();
-          auto rhs = binOp.getRHS().dyn_cast<AffineConstantExpr>();
-          if (lhs && rhs) {
-            continue; // 简单的偏移，仍然连续
-          }
-        }
-      }
-      // 复杂的表达式，可能不连续
-      if (!result.isa<AffineDimExpr>()) {
-        return false;
-      }
+    // 投影和重排映射通常是连续的
+    if (type == MappingType::Projection || type == MappingType::Permutation) {
+      return true;
     }
-
-    return true;
+    return false;
   }
 
   // 映射类型分类
@@ -492,27 +482,27 @@ private:
     }
   }
 
-  // 更新连续性检查方法
-  bool isContinuousMapping(AffineMap map) const {
-    MappingType type = analyzeMappingType(map);
+  // // 更新连续性检查方法
+  // bool isContinuousMapping(AffineMap map) const {
+  //   MappingType type = analyzeMappingType(map);
     
-    // 恒等映射和转置映射是连续的
-    if (type == MappingType::Identity || type == MappingType::Transpose) {
-      return true;
-    }
+  //   // 恒等映射和转置映射是连续的
+  //   if (type == MappingType::Identity || type == MappingType::Transpose) {
+  //     return true;
+  //   }
     
-    // 广播映射在某些情况下是连续的
-    if (type == MappingType::Broadcast) {
-      return isBroadcastContinuous(map);
-    }
+  //   // 广播映射在某些情况下是连续的
+  //   if (type == MappingType::Broadcast) {
+  //     return isBroadcastContinuous(map);
+  //   }
     
-    // 投影和重排映射通常是连续的
-    if (type == MappingType::Projection || type == MappingType::Permutation) {
-      return true;
-    }
+  //   // 投影和重排映射通常是连续的
+  //   if (type == MappingType::Projection || type == MappingType::Permutation) {
+  //     return true;
+  //   }
     
-    return false;
-  }
+  //   return false;
+  // }
 
   // 检查广播映射是否连续
   bool isBroadcastContinuous(AffineMap map) const {
@@ -1120,7 +1110,7 @@ private:
     
     // 获取目标三元组
     std::string targetTriple = llvm::sys::getDefaultTargetTriple();
-    llvm::Triple triple = llvm::Triple::normalize(targetTriple);
+    llvm::Triple triple(targetTriple);
     
     // 获取CPU名称
     config.cpuName = llvm::sys::getHostCPUName().str();
@@ -1379,7 +1369,7 @@ private:
   }
 
   // 执行向量化转换的主要方法
-  LogicalResult performVectorization(GenericOp op, OpAdaptor adaptor,
+  LogicalResult performVectorization(GenericOp op, ArrayRef<Value> operands,
                                     ConversionPatternRewriter &rewriter,
                                     const HardwareVectorizationConfig &hwConfig,
                                     const HardwareVectorizationAdvice &hwAdvice) const {
@@ -1387,15 +1377,15 @@ private:
     auto loc = op.getLoc();
     
     // 获取操作数
-    auto operands = op.getOperands();
+    auto opOperands = op.getOperands();
     auto results = op.getResults();
     
-    if (operands.empty() || results.empty()) {
+    if (opOperands.empty() || results.empty()) {
       return failure();
     }
 
     // 获取第一个操作数的类型信息
-    auto inputType = operands[0].getType().dyn_cast<MemRefType>();
+    auto inputType = opOperands[0].getType().dyn_cast<MemRefType>();
     if (!inputType) {
       return failure();
     }
@@ -1420,7 +1410,7 @@ private:
     // 获取维度信息
     SmallVector<Value> dimensions;
     for (int i = 0; i < rank; ++i) {
-      dimensions.push_back(rewriter.create<memref::DimOp>(loc, operands[0], i));
+      dimensions.push_back(rewriter.create<memref::DimOp>(loc, opOperands[0], i));
     }
 
     // 计算对齐边界和尾部长度
@@ -1451,13 +1441,13 @@ private:
     for (int i = 0; i < rank; ++i) {
       Value mask = rewriter.create<vector::CreateMaskOp>(
           loc, VectorType::get({vectorSize}, rewriter.getI1Type()),
-          ValueRange{unalignedLengths[i]});
+          unalignedLengths[i]);
       masks.push_back(mask);
     }
 
     // 构建完整的嵌套循环结构
-    LogicalResult result = buildCompleteLoopStructure(op, adaptor, rewriter, loc, 
-                                                     operands, results, dimensions, 
+    LogicalResult result = buildCompleteLoopStructure(op, operands, rewriter, loc, 
+                                                     opOperands, results, dimensions, 
                                                      upperBounds, unalignedLengths,
                                                      vectorType, masks, elementType, vectorSize);
     
@@ -1470,9 +1460,9 @@ private:
   }
 
   // 构建完整的嵌套循环结构
-  LogicalResult buildCompleteLoopStructure(GenericOp op, OpAdaptor adaptor,
+  LogicalResult buildCompleteLoopStructure(GenericOp op, ArrayRef<Value> operands,
                                           ConversionPatternRewriter &rewriter, Location loc,
-                                          const SmallVector<Value> &operands,
+                                          const SmallVector<Value> &opOperands,
                                           const SmallVector<Value> &results,
                                           const SmallVector<Value> &dimensions,
                                           const SmallVector<Value> &upperBounds,
@@ -1511,13 +1501,13 @@ private:
     }
 
     // 构建向量化操作
-    if (!buildVectorizedOperations(op, adaptor, rewriter, loc, operands, results,
+    if (!buildVectorizedOperations(op, operands, rewriter, loc, opOperands, results,
                                   vectorIndices, vectorType, masks, elementType)) {
       return failure();
     }
 
     // 处理尾部数据
-    if (!handleTailData(op, adaptor, rewriter, loc, operands, results,
+    if (!handleTailData(op, operands, rewriter, loc, opOperands, results,
                        upperBounds, unalignedLengths, vectorType, masks, elementType)) {
       return failure();
     }
@@ -1544,22 +1534,9 @@ private:
       // 创建affine.parallel操作
       auto parallelOp = rewriter.create<affine::AffineParallelOp>(
           loc, 
-          ValueRange{}, // 没有归约值
-          ValueRange{upperBounds[dim]}, // 上界
-          ArrayRef<NamedAttribute>{
-              rewriter.getNamedAttr("lowerBoundsGroups",
-                                   rewriter.getI32TensorAttr({1})),
-              rewriter.getNamedAttr("upperBoundsGroups",
-                                   rewriter.getI32TensorAttr({1})),
-              rewriter.getNamedAttr("lowerBoundsMap",
-                                   AffineMapAttr::get(AffineMap::get(0, 0, {}, rewriter.getContext()))),
-              rewriter.getNamedAttr("upperBoundsMap",
-                                   AffineMapAttr::get(AffineMap::get(0, 1, 
-                                       {rewriter.getAffineSymbolExpr(0).floorDiv(tileSize)},
-                                       rewriter.getContext()))),
-              rewriter.getNamedAttr("reductions", rewriter.getArrayAttr({})),
-              rewriter.getNamedAttr("steps", rewriter.getI64ArrayAttr({tileSize}))
-          });
+          TypeRange{}, // 结果类型
+          ArrayRef<arith::AtomicRMWKind>{}, // 归约操作
+          ArrayRef<int64_t>{0, tileSize}); // 范围 [0, tileSize]
 
       // 创建循环体
       Block *loopBody = new Block();
@@ -1608,7 +1585,7 @@ private:
 
       // 创建affine.for循环
       auto forOp = rewriter.create<affine::AffineForOp>(
-          loc, tileIndex, innerUpperBound, 1);
+          loc, 0, tileSize, 1);
       
       Value vectorIndex = forOp.getInductionVar();
       vectorIndices.push_back(vectorIndex);
@@ -1623,11 +1600,11 @@ private:
   }
 
   // 构建向量化操作
-  bool buildVectorizedOperations(GenericOp op, OpAdaptor adaptor,
+  bool buildVectorizedOperations(GenericOp op, ArrayRef<Value> operands,
                                 ConversionPatternRewriter &rewriter, Location loc,
-                                const SmallVector<Value> &operands,
+                                const SmallVector<Value> &opOperands,
                                 const SmallVector<Value> &results,
-                                const SmallVector<Value> &loopIndices,
+                                const SmallVector<Value> &vectorIndices,
                                 VectorType vectorType,
                                 const SmallVector<Value> &masks,
                                 Type elementType) const {
@@ -1636,17 +1613,7 @@ private:
     SmallVector<Value> vectorOperands;
     for (size_t i = 0; i < operands.size(); ++i) {
       auto transferRead = rewriter.create<vector::TransferReadOp>(
-          loc, vectorType, operands[i], loopIndices,
-          ArrayRef<NamedAttribute>{
-              rewriter.getNamedAttr("in_bounds", 
-                                   rewriter.getBoolArrayAttr(SmallVector<bool>(loopIndices.size(), true))),
-              rewriter.getNamedAttr("operand_segment_sizes",
-                                   rewriter.getDenseI32ArrayAttr(
-                                       SmallVector<int32_t>{1, static_cast<int32_t>(loopIndices.size()), 0})),
-              rewriter.getNamedAttr("permutation_map",
-                                   AffineMapAttr::get(AffineMap::getMultiDimIdentity(
-                                       loopIndices.size(), rewriter.getContext())))
-          });
+          loc, vectorType, operands[i], vectorIndices);
       vectorOperands.push_back(transferRead);
     }
 
@@ -1659,17 +1626,7 @@ private:
     // 创建向量写入操作
     for (size_t i = 0; i < results.size(); ++i) {
       rewriter.create<vector::TransferWriteOp>(
-          loc, vectorResults[i], results[i], loopIndices,
-          ArrayRef<NamedAttribute>{
-              rewriter.getNamedAttr("in_bounds", 
-                                   rewriter.getBoolArrayAttr(SmallVector<bool>(loopIndices.size(), true))),
-              rewriter.getNamedAttr("operand_segment_sizes",
-                                   rewriter.getDenseI32ArrayAttr(
-                                       SmallVector<int32_t>{1, static_cast<int32_t>(loopIndices.size()), 0})),
-              rewriter.getNamedAttr("permutation_map",
-                                   AffineMapAttr::get(AffineMap::getMultiDimIdentity(
-                                       loopIndices.size(), rewriter.getContext())))
-          });
+          loc, vectorResults[i], results[i], vectorIndices);
     }
 
     return true;
@@ -1698,7 +1655,7 @@ private:
     
     // 遍历原始操作并创建向量化版本
     for (auto &originalOp : originalBlock) {
-      if (originalOp.isTerminator()) {
+      if (originalOp.hasTrait<OpTrait::IsTerminator>()) {
         continue;
       }
       
@@ -1758,8 +1715,11 @@ private:
           auto vectorType = vectorOperands.empty() ? 
                            VectorType::get({16}, elementType) : // 默认大小
                            vectorOperands[0].getType().cast<VectorType>();
+          
+          // 创建标量常量值
+          auto scalarConst = rewriter.create<arith::ConstantOp>(loc, constValue);
           auto vectorConst = rewriter.create<vector::SplatOp>(
-              loc, vectorType, constValue);
+              loc, scalarConst, vectorType);
           vectorOperands.push_back(vectorConst);
         } else {
           return nullptr; // 无法处理的操作数
@@ -1774,17 +1734,17 @@ private:
     // 创建向量化操作
     switch (it->second) {
       case VectorOpType::Add:
-        return rewriter.create<vector::AddOp>(loc, vectorOperands[0], vectorOperands[1]);
+        return rewriter.create<arith::AddFOp>(loc, vectorOperands[0], vectorOperands[1]);
       case VectorOpType::Sub:
-        return rewriter.create<vector::SubOp>(loc, vectorOperands[0], vectorOperands[1]);
+        return rewriter.create<arith::SubFOp>(loc, vectorOperands[0], vectorOperands[1]);
       case VectorOpType::Mul:
-        return rewriter.create<vector::MulOp>(loc, vectorOperands[0], vectorOperands[1]);
+        return rewriter.create<arith::MulFOp>(loc, vectorOperands[0], vectorOperands[1]);
       case VectorOpType::Div:
-        return rewriter.create<vector::DivUOp>(loc, vectorOperands[0], vectorOperands[1]);
+        return rewriter.create<arith::DivFOp>(loc, vectorOperands[0], vectorOperands[1]);
       case VectorOpType::Max:
-        return rewriter.create<vector::MaximumOp>(loc, vectorOperands[0], vectorOperands[1]);
+        return rewriter.create<arith::MaximumFOp>(loc, vectorOperands[0], vectorOperands[1]);
       case VectorOpType::Min:
-        return rewriter.create<vector::MinimumOp>(loc, vectorOperands[0], vectorOperands[1]);
+        return rewriter.create<arith::MinimumFOp>(loc, vectorOperands[0], vectorOperands[1]);
       default:
         return nullptr;
     }
@@ -1800,9 +1760,9 @@ private:
   }
 
   // 处理尾部数据
-  bool handleTailData(GenericOp op, OpAdaptor adaptor,
+  bool handleTailData(GenericOp op, ArrayRef<Value> operands,
                      ConversionPatternRewriter &rewriter, Location loc,
-                     const SmallVector<Value> &operands,
+                     const SmallVector<Value> &opOperands,
                      const SmallVector<Value> &results,
                      const SmallVector<Value> &upperBounds,
                      const SmallVector<Value> &unalignedLengths,
@@ -1894,38 +1854,6 @@ private:
           analysis.isVectorizable = false;
           analysis.reason = "Found non-vectorizable operation: " + 
                            std::string(operation.getName().getStringRef());
-        }
-      }
-    }
-    
-    return analysis;
-  }
-
-  // 分析数据依赖
-  struct DependencyAnalysis {
-    bool isVectorizable;
-    std::string reason;
-    bool hasCrossIterationDeps;
-    bool hasLoopCarriedDeps;
-  };
-
-  DependencyAnalysis analyzeDataDependencies(GenericOp op) const {
-    DependencyAnalysis analysis;
-    analysis.isVectorizable = true;
-    analysis.reason = "No problematic dependencies found";
-    analysis.hasCrossIterationDeps = false;
-    analysis.hasLoopCarriedDeps = false;
-    
-    // 简化的依赖分析
-    // 在实际实现中，这里需要更复杂的依赖图分析
-    for (auto &block : op.getRegion()) {
-      for (auto &operation : block) {
-        // 检查是否有循环携带依赖
-        if (hasLoopCarriedDependency(&operation)) {
-          analysis.hasLoopCarriedDeps = true;
-          analysis.isVectorizable = false;
-          analysis.reason = "Found loop-carried dependency";
-          break;
         }
       }
     }
