@@ -1,4 +1,4 @@
-//===- LinalgGenericOptimization.cpp --------------------------------===//
+//===- LinalgGenericOptimization.cpp ----------------------------------===//
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file implements the GenericOp optimization.
+// This file implements the linalg generic optimization.
 //
 //===----------------------------------------------------------------------===//
 
@@ -54,33 +54,23 @@ using namespace affine;
 using namespace linalg;
 
 //===----------------------------------------------------------------------===//
-// Rewrite Pattern
+// LinalgGenericOptimizationPattern
 //===----------------------------------------------------------------------===//
 
 namespace {
-class LinalgGenericOptimiztaionPattern : public OpConversionPattern<GenericOp> {
+
+class LinalgGenericOptimizationPattern : public OpConversionPattern<GenericOp> {
 public:
-  explicit LinalgGenericOptimiztaionPattern(MLIRContext *context,
-                                            int64_t affineVectorSizeParam)
-      : OpConversionPattern(context), affineVectorSize(affineVectorSizeParam) {}
+  explicit LinalgGenericOptimizationPattern(MLIRContext *context)
+      : OpConversionPattern(context) {}
 
   LogicalResult
-  matchAndRewrite(GenericOp genericOp, ArrayRef<Value> operands,
+  matchAndRewrite(GenericOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    // Initialize Parameters
-    auto inputOperands = genericOp.getInputs();
-    auto outputOperands = genericOp.getOutputs();
-    int32_t inputSize = inputOperands.size();
-    int32_t outputSize = outputOperands.size();
-    Type elementType =
-        inputOperands[0].getType().cast<MemRefType>().getElementType();
-    
     return failure();
   }
-
-private:
-  int64_t affineVectorSize;
 };
+
 } // namespace
 
 //===----------------------------------------------------------------------===//
@@ -88,46 +78,51 @@ private:
 //===----------------------------------------------------------------------===//
 
 namespace {
+
 class LinalgGenericOptimizationPass
     : public PassWrapper<LinalgGenericOptimizationPass,
                          OperationPass<ModuleOp>> {
 public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LinalgGenericOptimizationPass)
+
   StringRef getArgument() const final { return "linalg-generic-optimization"; }
+
   StringRef getDescription() const final {
-    return "linalg dialect generic operator general optimization.";
+    return "Linalg generic optimization pass";
   }
 
   LinalgGenericOptimizationPass() = default;
+
   LinalgGenericOptimizationPass(const LinalgGenericOptimizationPass &) {}
-  explicit LinalgGenericOptimizationPass(int64_t affineVectorSizeParam) {
-    affineVectorSize = affineVectorSizeParam;
-  }
 
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     ModuleOp module = getOperation();
     ConversionTarget target(*context);
-    target.addLegalDialect<arith::ArithDialect, affine::AffineDialect,
-                           memref::MemRefDialect, VectorDialect>();
-    target.addLegalOp<ModuleOp, func::FuncOp, func::ReturnOp, linalg::FillOp>();
-    target.addLegalOp<linalg::FillOp>();
+    target.addLegalDialect<
+        arith::ArithDialect, affine::AffineDialect, memref::MemRefDialect,
+        VectorDialect, bufferization::BufferizationDialect, math::MathDialect,
+        func::FuncDialect, linalg::LinalgDialect>();
+    target
+        .addIllegalOp<ModuleOp, func::FuncOp, func::ReturnOp, linalg::FillOp>();
 
     RewritePatternSet patterns(context);
-    patterns.add<LinalgGenericOptimiztaionPattern>(context);
+    patterns.add<LinalgGenericOptimizationPattern>(context);
 
-    if (failed(applyPartialConversion(module, target, std::move(patterns))))
+    if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
       signalPassFailure();
+    }
   }
 
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<linalg::LinalgDialect, affine::AffineDialect, VectorDialect,
-                    memref::MemRefDialect>();
+    registry
+        .insert<linalg::LinalgDialect, affine::AffineDialect, VectorDialect,
+                memref::MemRefDialect, bufferization::BufferizationDialect>();
   }
 
-  Option<int64_t> affineVectorSize{*this, "vector-size",
-                                   llvm::cl::desc("Affine Vector size."),
-                                   llvm::cl::init(16)};
+  // Option<int64_t> affineVectorSize{*this, "vector-size",
+  //                                  llvm::cl::desc("Affine Vector size."),
+  //                                  llvm::cl::init(16)};
 };
 } // namespace
 
