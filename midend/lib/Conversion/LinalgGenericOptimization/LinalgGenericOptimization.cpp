@@ -27,6 +27,7 @@
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Attributes.h"
@@ -67,6 +68,7 @@ using namespace linalg;
 using namespace memref;
 using namespace func;
 using namespace math;
+using namespace scf;
 
 //===----------------------------------------------------------------------===//
 // LinalgGenericOptimizationPattern
@@ -141,8 +143,29 @@ private:
     int64_t dimSize;                    // 维度大小（如果可获取）
     bool isBoundKnown;                  // 维度边界是否已知
     
+    // 默认构造函数
+    IteratorDimension() 
+      : dimIndex(-1), iteratorType(""), dimSize(-1), isBoundKnown(false) {}
+    
+    // 带参数的构造函数
     IteratorDimension(int idx, const std::string& type) 
       : dimIndex(idx), iteratorType(type), dimSize(-1), isBoundKnown(false) {}
+      
+    // 拷贝构造函数
+    IteratorDimension(const IteratorDimension& other) 
+      : dimIndex(other.dimIndex), iteratorType(other.iteratorType), 
+        dimSize(other.dimSize), isBoundKnown(other.isBoundKnown) {}
+        
+    // 赋值操作符
+    IteratorDimension& operator=(const IteratorDimension& other) {
+      if (this != &other) {
+        dimIndex = other.dimIndex;
+        iteratorType = other.iteratorType;
+        dimSize = other.dimSize;
+        isBoundKnown = other.isBoundKnown;
+      }
+      return *this;
+    }
   };
 
   // 操作分析结果 - 重新设计保留完整信息
@@ -294,6 +317,11 @@ private:
     int64_t remainder;                 // 余数 (dimSize % vectorWidth)
     bool needsTailHandling;            // 是否需要尾部处理
     std::string tailStrategy;          // 尾部处理策略
+    
+    // 默认构造函数
+    VectorizationDimension() 
+      : dimIndex(-1), dimSize(0), vectorWidth(0), remainder(0), 
+        needsTailHandling(false), tailStrategy("") {}
     
     VectorizationDimension(int idx, int64_t size, int vecWidth) 
       : dimIndex(idx), dimSize(size), vectorWidth(vecWidth), 
@@ -681,20 +709,29 @@ private:
     auto vectorType = VectorType::get({vectorWidthElements}, elementType);
     Value zeroElement = rewriter.create<arith::ConstantOp>(loc, rewriter.getZeroAttr(elementType));
     
-    // 向量读取 - 使用实际的indexing map
+    // 向量读取 - 参考BuiltinTransposeVectorization.cpp的正确用法
     auto vectorRead = rewriter.create<vector::TransferReadOp>(
-        loc, vectorType, input, inputIndices, 
-        AffineMapAttr::get(inputMap), zeroElement,
-        ArrayRef<bool>(inputIndices.size(), true));
+        loc,
+        TypeRange{vectorType},
+        ValueRange{input, inputIndices[0], inputIndices.size() > 1 ? inputIndices[1] : inputIndices[0], zeroElement},
+        ArrayRef<NamedAttribute>{
+            rewriter.getNamedAttr("in_bounds", rewriter.getBoolArrayAttr(ArrayRef<bool>{false, true})),
+            rewriter.getNamedAttr("operand_segment_sizes", rewriter.getDenseI32ArrayAttr(ArrayRef<int>{1, 2, 1, 0})),
+            rewriter.getNamedAttr("permutation_map", AffineMapAttr::get(inputMap))
+        });
     
     // 处理linalg.generic的region操作
     Value result = processGenericRegion(rewriter, loc, op, vectorRead, elementType, decision);
     
-    // 向量写入 - 使用实际的indexing map
+    // 向量写入 - 参考BuiltinTransposeVectorization.cpp的正确用法
     rewriter.create<vector::TransferWriteOp>(
-        loc, result, output, outputIndices, 
-        AffineMapAttr::get(outputMap),
-        ArrayRef<bool>(outputIndices.size(), true));
+        loc, TypeRange{},
+        ValueRange{result, output, outputIndices[0], outputIndices.size() > 1 ? outputIndices[1] : outputIndices[0]},
+        ArrayRef<NamedAttribute>{
+            rewriter.getNamedAttr("in_bounds", rewriter.getBoolArrayAttr(ArrayRef<bool>{true, true})),
+            rewriter.getNamedAttr("operand_segment_sizes", rewriter.getDenseI32ArrayAttr(ArrayRef<int>{1, 1, 2, 0})),
+            rewriter.getNamedAttr("permutation_map", AffineMapAttr::get(outputMap))
+        });
   }
 
   /**
@@ -869,18 +906,29 @@ private:
           Value zeroElement = builder.create<arith::ConstantOp>(loc, builder.getZeroAttr(elementType));
           auto identityMap = AffineMap::getMultiDimIdentityMap(dimSizes.size(), builder.getContext());
           
-          // 使用掩码进行向量读取
+          // 使用掩码进行向量读取 - 参考BuiltinTransposeVectorization.cpp的正确用法
           auto maskedRead = builder.create<vector::TransferReadOp>(
-              loc, vectorType, input, tailIndices, identityMap, zeroElement, mask,
-              ArrayRef<bool>(dimSizes.size(), false)); // 允许越界，使用掩码
+              loc,
+              TypeRange{vectorType},
+              ValueRange{input, tailIndices[0], tailIndices.size() > 1 ? tailIndices[1] : tailIndices[0], zeroElement},
+              ArrayRef<NamedAttribute>{
+                  builder.getNamedAttr("in_bounds", builder.getBoolArrayAttr(ArrayRef<bool>{false, true})),
+                  builder.getNamedAttr("operand_segment_sizes", builder.getDenseI32ArrayAttr(ArrayRef<int>{1, 2, 1, 0})),
+                  builder.getNamedAttr("permutation_map", AffineMapAttr::get(identityMap))
+              });
           
           // 简单的恒等操作（实际应该根据linalg.generic的操作）
           Value result = maskedRead;
           
-          // 使用掩码进行向量写入
+          // 使用掩码进行向量写入 - 参考BuiltinTransposeVectorization.cpp的正确用法
           builder.create<vector::TransferWriteOp>(
-              loc, result, output, tailIndices, identityMap, mask,
-              ArrayRef<bool>(dimSizes.size(), false));
+              loc, TypeRange{},
+              ValueRange{result, output, tailIndices[0], tailIndices.size() > 1 ? tailIndices[1] : tailIndices[0]},
+              ArrayRef<NamedAttribute>{
+                  builder.getNamedAttr("in_bounds", builder.getBoolArrayAttr(ArrayRef<bool>{true, true})),
+                  builder.getNamedAttr("operand_segment_sizes", builder.getDenseI32ArrayAttr(ArrayRef<int>{1, 1, 2, 0})),
+                  builder.getNamedAttr("permutation_map", AffineMapAttr::get(identityMap))
+              });
               
           builder.create<scf::YieldOp>(loc);
         });
@@ -897,51 +945,46 @@ private:
   VectorizationAnalysisResult performComprehensiveAnalysis(linalg::GenericOp op) const {
     VectorizationAnalysisResult result;
     
-    try {
-      // 1. 硬件环境分析 - 检测当前硬件的向量化支持能力
-      result.hardware = analyzeHardwareCapability();
-      result.hardwareCapable = result.hardware.isVectorizationCapable;
-      
-      // 2. 操作模式分析 - 分析迭代器类型和region中的操作
-      result.operation = analyzeOperationPattern(op);
-      result.operationCompatible = result.operation.allOpsVectorizable && 
-                                  !result.operation.getParallelDims().empty();
-      
-      // 3. 内存访问模式分析 - 分析indexing maps确定内存访问模式
-      result.memoryAccess = analyzeMemoryAccessPattern(op);
-      result.memoryFriendly = result.memoryAccess.isVectorizationFriendly;
+    // 1. 硬件环境分析 - 检测当前硬件的向量化支持能力
+    result.hardware = analyzeHardwareCapability();
+    result.hardwareCapable = result.hardware.isVectorizationCapable;
+    
+    // 2. 操作模式分析 - 分析迭代器类型和region中的操作
+    result.operation = analyzeOperationPattern(op);
+    result.operationCompatible = result.operation.allOpsVectorizable && 
+                                !result.operation.getParallelDims().empty();
+    
+    // 3. 内存访问模式分析 - 分析indexing maps确定内存访问模式
+    result.memoryAccess = analyzeMemoryAccessPattern(op);
+    result.memoryFriendly = result.memoryAccess.isVectorizationFriendly;
 
-      // 4. 数据类型分析 - 提取操作数的实际数据类型 - 新增！
-      result.dataType = analyzeDataType(op);
-      if (result.dataType.elementSizeBytes == 0) {
-        result.failureReason = "无法确定数据类型或不支持的数据类型";
-        return result;
-      }
+    // 4. 数据类型分析 - 提取操作数的实际数据类型 - 新增！
+    result.dataType = analyzeDataType(op);
+    if (result.dataType.elementSizeBytes == 0) {
+      result.failureReason = "无法确定数据类型或不支持的数据类型";
+      return result;
+    }
 
-      // 5. 状态一致性检查 - 确保并行维度与连续维度有交集
-      if (result.hardwareCapable && result.operationCompatible && result.memoryFriendly) {
-        bool hasValidDimension = checkDimensionConsistency(result.operation, result.memoryAccess);
-        if (hasValidDimension) {
-          result.isValid = true;
-        } else {
-          result.failureReason = "并行维度与连续内存维度无交集，无法有效向量化";
-        }
+    // 5. 状态一致性检查 - 确保并行维度与连续维度有交集
+    if (result.hardwareCapable && result.operationCompatible && result.memoryFriendly) {
+      bool hasValidDimension = checkDimensionConsistency(result.operation, result.memoryAccess);
+      if (hasValidDimension) {
+        result.isValid = true;
       } else {
-        // 构建详细的失败原因
-        std::vector<std::string> reasons;
-        if (!result.hardwareCapable) reasons.push_back("硬件不支持向量化");
-        if (!result.operationCompatible) reasons.push_back("操作不兼容向量化"); 
-        if (!result.memoryFriendly) reasons.push_back("内存访问模式不适合向量化");
-        
-        result.failureReason = "分析失败: ";
-        for (size_t i = 0; i < reasons.size(); ++i) {
-          result.failureReason += reasons[i];
-          if (i < reasons.size() - 1) result.failureReason += "; ";
-        }
+        result.failureReason = "并行维度与连续内存维度无交集，无法有效向量化";
       }
-
-    } catch (const std::exception& e) {
-      result.failureReason = std::string("分析过程异常: ") + e.what();
+    } else {
+      // 构建详细的失败原因
+      std::vector<std::string> reasons;
+      if (!result.hardwareCapable) reasons.push_back("硬件不支持向量化");
+      if (!result.operationCompatible) reasons.push_back("操作不兼容向量化"); 
+      if (!result.memoryFriendly) reasons.push_back("内存访问模式不适合向量化");
+      
+      result.failureReason = "分析失败: ";
+      for (size_t i = 0; i < reasons.size(); ++i) {
+        result.failureReason += reasons[i];
+        if (i < reasons.size() - 1) result.failureReason += "; ";
+      }
     }
 
     return result;
@@ -1043,21 +1086,15 @@ private:
         IteratorDimension dimInfo(i, iterType.str());
         
         // 尝试获取维度大小信息（从操作数的shape中推断）
-        try {
-          // 从第一个输入操作数获取维度信息
-          if (!op.getInputs().empty()) {
-            Value input = op.getInputs()[0];
-            if (auto shapedType = input.getType().dyn_cast<ShapedType>()) {
-              if (i < static_cast<int>(shapedType.getRank()) && !shapedType.isDynamicDim(i)) {
-                dimInfo.dimSize = shapedType.getDimSize(i);
-                dimInfo.isBoundKnown = true;
-              }
+        // 从第一个输入操作数获取维度信息
+        if (!op.getInputs().empty()) {
+          Value input = op.getInputs()[0];
+          if (auto shapedType = input.getType().dyn_cast<ShapedType>()) {
+            if (i < static_cast<int>(shapedType.getRank()) && !shapedType.isDynamicDim(i)) {
+              dimInfo.dimSize = shapedType.getDimSize(i);
+              dimInfo.isBoundKnown = true;
             }
           }
-        } catch (...) {
-          // 获取失败，保持默认值
-          dimInfo.isBoundKnown = false;
-          dimInfo.dimSize = -1;
         }
         
         info.dimensions.push_back(dimInfo);
@@ -1406,60 +1443,55 @@ private:
   VectorizationDecision makeVectorizationDecision(const VectorizationAnalysisResult& analysis) const {
     VectorizationDecision decision;
     
-    try {
-      // 1. 向量化维度选择 - 选择最适合的并行维度进行向量化
-      decision.vectorizedDims = selectVectorizationDimensions(analysis);
-      if (decision.vectorizedDims.empty()) {
-        decision.failureReason = "无法找到合适的向量化维度";
-        return decision;
-      }
-      
-      // 2. 确定向量宽度和数据类型
-      decision.effectiveVectorWidth = determineVectorWidth(analysis, decision.vectorizedDims);
-      decision.vectorType = determineVectorType(analysis);
-      
-      // 3. 分块策略决策 - 最多二维分块
-      decision.tiling = determineTilingStrategy(analysis, decision.vectorizedDims);
-      
-      // 4. 边界处理策略
-      determineTailHandlingStrategy(decision.vectorizedDims, analysis.hardware);
-      
-      // 5. 转换策略选择
-      decision.conversionStrategy = selectConversionStrategy(analysis, decision);
-      decision.useFMA = analysis.hardware.supportsFMA && shouldUseFMA(analysis);
-      
-      decision.isValid = true;
-      
-      LLVM_DEBUG({
-        llvm::dbgs() << "向量化决策详细结果:\n";
-        llvm::dbgs() << "  向量化维度数: " << decision.vectorizedDims.size() << "\n";
-        for (size_t i = 0; i < decision.vectorizedDims.size(); ++i) {
-          const auto& dim = decision.vectorizedDims[i];
-          llvm::dbgs() << "    维度" << i << ": 索引=" << dim.dimIndex 
-                       << ", 大小=" << dim.dimSize 
-                       << ", 向量宽度=" << dim.vectorWidth << "位"
-                       << ", 余数=" << dim.remainder
-                       << ", 尾部处理=" << dim.tailStrategy << "\n";
-        }
-        llvm::dbgs() << "  有效向量宽度: " << decision.effectiveVectorWidth << "位\n";
-        llvm::dbgs() << "  向量类型: " << decision.vectorType << "\n";
-        llvm::dbgs() << "  分块级别: " << decision.tiling.tilingLevel << "\n";
-        if (decision.tiling.isValid) {
-          llvm::dbgs() << "  分块维度: ";
-          for (size_t i = 0; i < decision.tiling.tiledDims.size(); ++i) {
-            llvm::dbgs() << "维度" << decision.tiling.tiledDims[i] 
-                         << "(大小=" << decision.tiling.tileSizes[i] << ")";
-            if (i < decision.tiling.tiledDims.size() - 1) llvm::dbgs() << ", ";
-          }
-          llvm::dbgs() << "\n";
-        }
-        llvm::dbgs() << "  使用FMA: " << (decision.useFMA ? "是" : "否") << "\n";
-        llvm::dbgs() << "  转换策略: " << decision.conversionStrategy << "\n";
-      });
-      
-    } catch (const std::exception& e) {
-      decision.failureReason = std::string("决策过程异常: ") + e.what();
+    // 1. 向量化维度选择 - 选择最适合的并行维度进行向量化
+    decision.vectorizedDims = selectVectorizationDimensions(analysis);
+    if (decision.vectorizedDims.empty()) {
+      decision.failureReason = "无法找到合适的向量化维度";
+      return decision;
     }
+    
+    // 2. 确定向量宽度和数据类型
+    decision.effectiveVectorWidth = determineVectorWidth(analysis, decision.vectorizedDims);
+    decision.vectorType = determineVectorType(analysis);
+    
+    // 3. 分块策略决策 - 最多二维分块
+    decision.tiling = determineTilingStrategy(analysis, decision.vectorizedDims);
+    
+    // 4. 边界处理策略
+    determineTailHandlingStrategy(decision.vectorizedDims, analysis.hardware);
+    
+    // 5. 转换策略选择
+    decision.conversionStrategy = selectConversionStrategy(analysis, decision);
+    decision.useFMA = analysis.hardware.supportsFMA && shouldUseFMA(analysis);
+    
+    decision.isValid = true;
+    
+    LLVM_DEBUG({
+      llvm::dbgs() << "向量化决策详细结果:\n";
+      llvm::dbgs() << "  向量化维度数: " << decision.vectorizedDims.size() << "\n";
+      for (size_t i = 0; i < decision.vectorizedDims.size(); ++i) {
+        const auto& dim = decision.vectorizedDims[i];
+        llvm::dbgs() << "    维度" << i << ": 索引=" << dim.dimIndex 
+                     << ", 大小=" << dim.dimSize 
+                     << ", 向量宽度=" << dim.vectorWidth << "位"
+                     << ", 余数=" << dim.remainder
+                     << ", 尾部处理=" << dim.tailStrategy << "\n";
+      }
+      llvm::dbgs() << "  有效向量宽度: " << decision.effectiveVectorWidth << "位\n";
+      llvm::dbgs() << "  向量类型: " << decision.vectorType << "\n";
+      llvm::dbgs() << "  分块级别: " << decision.tiling.tilingLevel << "\n";
+      if (decision.tiling.isValid) {
+        llvm::dbgs() << "  分块维度: ";
+        for (size_t i = 0; i < decision.tiling.tiledDims.size(); ++i) {
+          llvm::dbgs() << "维度" << decision.tiling.tiledDims[i] 
+                       << "(大小=" << decision.tiling.tileSizes[i] << ")";
+          if (i < decision.tiling.tiledDims.size() - 1) llvm::dbgs() << ", ";
+        }
+        llvm::dbgs() << "\n";
+      }
+      llvm::dbgs() << "  使用FMA: " << (decision.useFMA ? "是" : "否") << "\n";
+      llvm::dbgs() << "  转换策略: " << decision.conversionStrategy << "\n";
+    });
     
     return decision;
   }
