@@ -25,8 +25,7 @@ endif
 test-simple-add:
 	@echo "Testing simple element-wise addition..."
 	@$(BUDDY_OPT) ./test-simple-add.mlir \
-		-pass-pipeline "builtin.module(func.func(linalg-generic-optimization))" \
-	| $(BUDDY_OPT) \
+		-linalg-generic-optimization \
 		-eliminate-empty-tensors \
 		-empty-tensor-to-alloc-tensor \
 		-one-shot-bufferize \

@@ -78,8 +78,18 @@ namespace {
 
 class LinalgGenericOptimizationPattern : public OpConversionPattern<linalg::GenericOp> {
 public:
-  explicit LinalgGenericOptimizationPattern(MLIRContext *context)
-      : OpConversionPattern(context) {}
+  explicit LinalgGenericOptimizationPattern(MLIRContext *context,
+                                           const std::string& userArch = "x86_64",
+                                           int64_t userVecWidth = 256,
+                                           const std::string& userVecExt = "AVX2", 
+                                           bool userFMA = false,
+                                           int64_t userTile = 32)
+      : OpConversionPattern(context),
+        userArchitecture(userArch),
+        userVectorWidth(userVecWidth),
+        userVectorExtension(userVecExt),
+        userEnableFMA(userFMA),
+        userTileSize(userTile) {}
 
   LogicalResult
   matchAndRewrite(linalg::GenericOp op, OpAdaptor adaptor,
@@ -436,8 +446,13 @@ private:
     
     int outerDim = tiledDims[0];
     int innerDim = tiledDims[1];
-    int64_t outerTileSize = tileSizes[0];
-    int64_t innerTileSize = tileSizes[1];
+    
+    // 使用用户提供的编译时常量进行分块
+    int64_t outerTileSize = userTileSize;         // 外层使用用户指定的分块大小
+    int64_t innerTileSize = userTileSize / 2;     // 内层使用一半大小
+    
+    LLVM_DEBUG(llvm::dbgs() << "创建两层并行循环，使用编译时分块大小: 外层=" 
+                           << outerTileSize << ", 内层=" << innerTileSize << "\n");
     
     // 创建外层并行循环
     affine::AffineParallelOp outerParallelOp = rewriter.create<affine::AffineParallelOp>(
@@ -448,7 +463,7 @@ private:
             rewriter.getNamedAttr("lowerBoundsMap",
                 AffineMapAttr::get(AffineMap::get(0, 0, {rewriter.getAffineConstantExpr(0)}, rewriter.getContext()))),
             rewriter.getNamedAttr("upperBoundsMap",
-                AffineMapAttr::get(AffineMap::get(0, 1, {rewriter.getAffineDimExpr(0).floorDiv(outerTileSize) * outerTileSize}, rewriter.getContext()))),
+                AffineMapAttr::get(AffineMap::get(0, 1, {rewriter.getAffineSymbolExpr(0).floorDiv(outerTileSize) * outerTileSize}, rewriter.getContext()))),
             rewriter.getNamedAttr("steps", rewriter.getI64ArrayAttr({outerTileSize})),
             rewriter.getNamedAttr("reductions", rewriter.getArrayAttr({}))
         });
@@ -468,7 +483,7 @@ private:
             rewriter.getNamedAttr("lowerBoundsMap",
                 AffineMapAttr::get(AffineMap::get(0, 0, {rewriter.getAffineConstantExpr(0)}, rewriter.getContext()))),
             rewriter.getNamedAttr("upperBoundsMap",
-                AffineMapAttr::get(AffineMap::get(0, 1, {rewriter.getAffineDimExpr(0).floorDiv(innerTileSize) * innerTileSize}, rewriter.getContext()))),
+                AffineMapAttr::get(AffineMap::get(0, 1, {rewriter.getAffineSymbolExpr(0).floorDiv(innerTileSize) * innerTileSize}, rewriter.getContext()))),
             rewriter.getNamedAttr("steps", rewriter.getI64ArrayAttr({innerTileSize})),
             rewriter.getNamedAttr("reductions", rewriter.getArrayAttr({}))
         });
@@ -512,7 +527,11 @@ private:
     }
     
     int tiledDim = decision.tiling.tiledDims[0];
-    int64_t tileSize = decision.tiling.tileSizes[0];
+    
+    // 使用用户提供的编译时常量进行分块
+    int64_t tileSize = userTileSize;
+    
+    LLVM_DEBUG(llvm::dbgs() << "创建单层并行循环，使用编译时分块大小: " << tileSize << "\n");
     
     // 创建并行循环
     affine::AffineParallelOp parallelOp = rewriter.create<affine::AffineParallelOp>(
@@ -523,7 +542,7 @@ private:
             rewriter.getNamedAttr("lowerBoundsMap",
                 AffineMapAttr::get(AffineMap::get(0, 0, {rewriter.getAffineConstantExpr(0)}, rewriter.getContext()))),
             rewriter.getNamedAttr("upperBoundsMap",
-                AffineMapAttr::get(AffineMap::get(0, 1, {rewriter.getAffineDimExpr(0).floorDiv(tileSize) * tileSize}, rewriter.getContext()))),
+                AffineMapAttr::get(AffineMap::get(0, 1, {rewriter.getAffineSymbolExpr(0).floorDiv(tileSize) * tileSize}, rewriter.getContext()))),
             rewriter.getNamedAttr("steps", rewriter.getI64ArrayAttr({tileSize})),
             rewriter.getNamedAttr("reductions", rewriter.getArrayAttr({}))
         });
@@ -638,12 +657,17 @@ private:
     }
     
     const auto& vecDim = decision.vectorizedDims[0];
-    int vectorWidthElements = decision.effectiveVectorWidth / analysis.dataType.elementSizeBits;
+    
+    // 使用用户提供的编译时常量计算向量元素数量
+    int64_t vectorWidthElements = calculateVectorElementsFromUserParams(elementType);
+    
+    LLVM_DEBUG(llvm::dbgs() << "创建向量化内层循环，使用编译时向量元素数: " 
+                           << vectorWidthElements << "\n");
     
     // 计算向量化的上边界（对齐的部分）
     Value vectorUpperBound = rewriter.create<affine::AffineApplyOp>(
         loc,
-        AffineMap::get(1, 0, rewriter.getAffineDimExpr(0).floorDiv(vectorWidthElements) * vectorWidthElements),
+        AffineMap::get(1, 0, {rewriter.getAffineDimExpr(0).floorDiv(vectorWidthElements) * vectorWidthElements}),
         ValueRange{dimSizes[vecDim.dimIndex]});
     
     // 创建向量化循环
@@ -679,7 +703,11 @@ private:
       Type elementType, const VectorizationDecision& decision,
       const VectorizationAnalysisResult& analysis) const {
     
-    int vectorWidthElements = decision.effectiveVectorWidth / analysis.dataType.elementSizeBits;
+    // 使用用户提供的编译时常量计算向量元素数量
+    int64_t vectorWidthElements = calculateVectorElementsFromUserParams(elementType);
+    
+    LLVM_DEBUG(llvm::dbgs() << "创建向量化计算，使用编译时向量元素数: " 
+                           << vectorWidthElements << "\n");
     
     // 构建完整的索引向量 - 针对所有维度
     llvm::SmallVector<Value, 4> inputIndices(dimSizes.size());
@@ -878,8 +906,13 @@ private:
     // 计算尾部长度
     Value remainingLength = rewriter.create<arith::SubIOp>(loc, dimSizes[vecDim.dimIndex], vectorUpperBound);
     
+    // 使用用户提供的编译时常量计算向量元素数量
+    int64_t vectorWidthElements = calculateVectorElementsFromUserParams(elementType);
+    
+    LLVM_DEBUG(llvm::dbgs() << "创建尾部处理，使用编译时向量元素数: " 
+                           << vectorWidthElements << "\n");
+    
     // 创建尾部掩码
-    int vectorWidthElements = decision.effectiveVectorWidth / analysis.dataType.elementSizeBits;
     Value mask = rewriter.create<vector::CreateMaskOp>(
         loc, VectorType::get({vectorWidthElements}, rewriter.getI1Type()),
         ValueRange{remainingLength});
@@ -991,79 +1024,56 @@ private:
   }
 
   /**
-   * 硬件能力分析 - 检测当前硬件的向量化支持能力
-   * 分析CPU架构、向量扩展、向量宽度等硬件特性
+   * 硬件能力分析 - 基于用户提供的编译时参数构建硬件信息
+   * 不再进行运行时检测，而是使用用户在编译时提供的硬件配置
+   * 这确保了后续AffineMap构建时使用的都是编译时常量
    */
   HardwareInfo analyzeHardwareCapability() const {
     HardwareInfo info;
     
-    // 获取目标三元组和基本信息
-    std::string targetTriple = llvm::sys::getDefaultTargetTriple();
-    llvm::Triple triple(targetTriple);
-    info.architecture = triple.getArchName().str();
-    info.cpuName = llvm::sys::getHostCPUName().str();
+    // 使用用户提供的编译时常量
+    info.architecture = userArchitecture;
+    info.vectorExtension = userVectorExtension;
+    info.vectorWidthBits = userVectorWidth;
+    info.vectorWidthBytes = userVectorWidth / 8;
+    info.supportsFMA = userEnableFMA;
     
-    // 根据架构设置默认配置
-    switch (triple.getArch()) {
-      case llvm::Triple::x86_64:
-        info.vectorWidthBits = 128;    // SSE2默认
-        info.vectorWidthBytes = 16;
-        info.vectorExtension = "SSE2";
-        info.supportsFMA = false;
-        break;
-      case llvm::Triple::aarch64:
-        info.vectorWidthBits = 128;    // NEON默认
-        info.vectorWidthBytes = 16;
-        info.vectorExtension = "NEON";
-        info.supportsFMA = true;       // ARM通常支持FMA
-        break;
-      default:
-        info.vectorWidthBits = 128;
-        info.vectorWidthBytes = 16;
-        info.vectorExtension = "Generic";
-        info.supportsFMA = false;
-        break;
+    // 基于用户配置设置CPU名称（用于日志）
+    info.cpuName = "user_specified_" + userArchitecture;
+    
+    // 验证用户配置的合理性（编译时检查）
+    if (userVectorWidth < 128 || userVectorWidth % 128 != 0) {
+      LLVM_DEBUG(llvm::dbgs() << "警告: 用户指定的向量宽度(" << userVectorWidth 
+                             << "位)可能不合理，建议使用128/256/512\n");
     }
-
-    // 检测具体的CPU特性
-    llvm::StringMap<bool> features;
-    if (llvm::sys::getHostCPUFeatures(features)) {
-      if (triple.getArch() == llvm::Triple::x86_64) {
-        // X86架构特性检测 - 优先使用更高级的向量扩展
-        if (features.lookup("avx512f")) {
-          info.vectorWidthBits = 512;
-          info.vectorWidthBytes = 64;
-          info.vectorExtension = "AVX512";
-          info.supportsFMA = true;
-        } else if (features.lookup("avx2")) {
-          info.vectorWidthBits = 256;
-          info.vectorWidthBytes = 32;
-          info.vectorExtension = "AVX2";
-          info.supportsFMA = features.lookup("fma");
-        } else if (features.lookup("avx")) {
-          info.vectorWidthBits = 256;
-          info.vectorWidthBytes = 32;
-          info.vectorExtension = "AVX";
-          info.supportsFMA = features.lookup("fma");
-        }
-      } else if (triple.getArch() == llvm::Triple::aarch64) {
-        // ARM架构特性检测
-        if (features.lookup("sve")) {
-          info.vectorWidthBits = 512;  // SVE可变长度，假设512位
-          info.vectorWidthBytes = 64;
-          info.vectorExtension = "SVE";
-        }
-      }
+    
+    // 检查架构与向量扩展的匹配性
+    bool validCombination = true;
+    if (userArchitecture == "x86_64") {
+      validCombination = (userVectorExtension == "SSE2" || 
+                         userVectorExtension == "AVX" ||
+                         userVectorExtension == "AVX2" || 
+                         userVectorExtension == "AVX512");
+    } else if (userArchitecture == "aarch64") {
+      validCombination = (userVectorExtension == "NEON" || 
+                         userVectorExtension == "SVE");
     }
-
-    // 设置向量化支持标志 - 128位及以上认为支持
-    info.isVectorizationCapable = (info.vectorWidthBits >= 128);
-
-    LLVM_DEBUG(llvm::dbgs() << "硬件分析: " << info.architecture 
-                           << " " << info.cpuName 
+    
+    if (!validCombination) {
+      LLVM_DEBUG(llvm::dbgs() << "警告: 架构(" << userArchitecture 
+                             << ")与向量扩展(" << userVectorExtension 
+                             << ")组合可能不匹配\n");
+    }
+    
+    // 设置向量化支持标志 - 基于用户配置
+    info.isVectorizationCapable = (userVectorWidth >= 128);
+    
+    LLVM_DEBUG(llvm::dbgs() << "硬件分析(用户配置): " << info.architecture 
                            << " " << info.vectorExtension 
-                           << " " << info.vectorWidthBits << "位\n");
-
+                           << " " << info.vectorWidthBits << "位"
+                           << " FMA=" << info.supportsFMA 
+                           << " 向量化=" << info.isVectorizationCapable << "\n");
+    
     return info;
   }
 
@@ -1077,13 +1087,22 @@ private:
     info.allOpsVectorizable = true;
 
     // 1. 分析迭代器类型 - 保留完整的维度信息
-    ArrayAttr iteratorTypes = op.getIteratorTypes();
-    if (iteratorTypes) {
-      for (int i = 0; i < static_cast<int>(iteratorTypes.size()); ++i) {
-        StringRef iterType = cast<StringAttr>(iteratorTypes[i]).getValue();
+    auto iteratorTypesArray = op.getIteratorTypesArray();
+    for (int i = 0; i < static_cast<int>(iteratorTypesArray.size()); ++i) {
+      auto iterType = iteratorTypesArray[i];
+      std::string iterTypeStr;
+      
+      // 将枚举类型转换为字符串
+      if (iterType == utils::IteratorType::parallel) {
+        iterTypeStr = "parallel";
+      } else if (iterType == utils::IteratorType::reduction) {
+        iterTypeStr = "reduction";
+      } else {
+        iterTypeStr = "unknown";
+      }
         
-        // 创建维度信息对象，保留索引-类型映射
-        IteratorDimension dimInfo(i, iterType.str());
+      // 创建维度信息对象，保留索引-类型映射
+      IteratorDimension dimInfo(i, iterTypeStr);
         
         // 尝试获取维度大小信息（从操作数的shape中推断）
         // 从第一个输入操作数获取维度信息
@@ -1097,8 +1116,7 @@ private:
           }
         }
         
-        info.dimensions.push_back(dimInfo);
-      }
+      info.dimensions.push_back(dimInfo);
     }
 
     // 2. 分析region中的操作 - 检查每个操作的向量化兼容性
@@ -1534,7 +1552,7 @@ private:
       
       // 计算该维度的向量化参数 - 使用实际数据类型
       int64_t dimSize = dimInfo->dimSize;
-      int vectorWidth = calculateOptimalVectorWidth(dimSize, hardwareVectorWidth, analysis.dataType);
+      int vectorWidth = calculateOptimalVectorWidth(dimSize, analysis.dataType.elementType);
       
       if (vectorWidth > 0) {
         VectorizationDimension vecDim(dimIndex, dimSize, vectorWidth);
@@ -1557,33 +1575,47 @@ private:
   }
 
   /**
-   * 计算最优向量宽度 - 考虑维度大小、硬件能力和实际数据类型
+   * 计算最优向量宽度 - 基于用户参数和编译时类型分析
+   * 完全使用编译时常量，确保AffineMap构建正确
    */
-  int calculateOptimalVectorWidth(int64_t dimSize, int hardwareVectorWidth, 
-                                 const DataTypeInfo& dataType) const {
-    // 使用实际数据类型计算向量元素数 - 修复硬编码问题！
-    int elementSizeBytes = dataType.elementSizeBytes;
-    if (elementSizeBytes == 0) {
-      return 0; // 无效的数据类型
+  int calculateOptimalVectorWidth(int64_t dimSize, Type elementType) const {
+    // 使用编译时可确定的元素大小
+    int64_t elementSizeBits = 32; // 默认f32
+    
+    // 基于类型进行编译时分支判断
+    if (auto floatType = elementType.dyn_cast<FloatType>()) {
+      elementSizeBits = floatType.getWidth(); // 编译时已知
+    } else if (auto intType = elementType.dyn_cast<IntegerType>()) {
+      elementSizeBits = intType.getWidth(); // 编译时已知
+    } else if (elementType.isa<IndexType>()) {
+      elementSizeBits = 64; // 编译时常量
+    } else {
+      // 对于其他类型，使用保守的默认值
+      elementSizeBits = 32;
     }
     
-    int maxElements = hardwareVectorWidth / (elementSizeBytes * 8);
+    // 使用用户指定的硬件向量宽度（编译时常量）
+    int64_t hardwareVectorWidth = userVectorWidth;
+    
+    // 计算最大向量元素数
+    int64_t maxElements = hardwareVectorWidth / elementSizeBits;
     
     // 确保向量宽度不超过维度大小
-    int optimalElements = std::min(static_cast<int>(dimSize), maxElements);
+    int64_t optimalElements = std::min(dimSize, maxElements);
     
     // 如果维度太小，不适合向量化
     if (optimalElements < 2) {
       return 0;
     }
     
-    // 优先选择2的幂次方
-    int powerOfTwo = 1;
+    // 优先选择2的幂次方（编译时计算）
+    int64_t powerOfTwo = 1;
     while (powerOfTwo * 2 <= optimalElements) {
       powerOfTwo *= 2;
     }
     
-    return powerOfTwo * elementSizeBytes * 8; // 返回位宽
+    // 返回元素数量（而不是位宽，与VectorizationDimension.vectorWidth保持一致）
+    return static_cast<int>(powerOfTwo);
   }
 
   /**
@@ -1671,13 +1703,13 @@ private:
    */
   std::string selectConversionStrategy(const VectorizationAnalysisResult& analysis,
                                       const VectorizationDecision& decision) const {
-    // 根据分块级别选择转换策略
+    // 根据分块级别选择转换策略 - 修正为实际使用的affine方言
     if (decision.tiling.tilingLevel == 2) {
-      return "affine.parallel"; // 二维分块使用affine.parallel
+      return "affine.parallel"; // 双层并行分块：两层affine.parallel
     } else if (decision.tiling.tilingLevel == 1) {
-      return "scf.for"; // 一维分块使用scf.for
+      return "affine.parallel+affine.for"; // 单层分块：一层affine.parallel + affine.for
     } else {
-      return "scf.for"; // 默认使用scf.for
+      return "affine.for"; // 无分块：纯affine.for循环
     }
   }
 
@@ -1884,6 +1916,54 @@ private:
      LLVM_DEBUG(llvm::dbgs() << "检测到自定义或未知元素类型\n");
      return true; // 即使是未知类型也返回true，使用默认值
    }
+
+  //===--------------------------------------------------------------------===//
+  // 用户参数辅助方法
+  //===--------------------------------------------------------------------===//
+
+  /**
+   * 基于用户提供的参数计算向量元素数量 - 纯编译时计算
+   * 完全避免运行时变量，确保AffineMap构建正确
+   */
+  int64_t calculateVectorElementsFromUserParams(Type elementType) const {
+    // 使用编译时可确定的元素大小计算
+    int64_t elementSizeBits = 32; // 默认f32
+    
+    // 基于类型进行编译时分支判断
+    if (auto floatType = elementType.dyn_cast<FloatType>()) {
+      elementSizeBits = floatType.getWidth(); // 编译时已知
+    } else if (auto intType = elementType.dyn_cast<IntegerType>()) {
+      elementSizeBits = intType.getWidth(); // 编译时已知
+    } else if (elementType.isa<IndexType>()) {
+      elementSizeBits = 64; // 编译时常量
+    } else {
+      // 对于其他类型，使用保守的默认值
+      elementSizeBits = 32;
+    }
+    
+    // 使用用户指定的向量宽度进行编译时计算
+    int64_t vectorElements = userVectorWidth / elementSizeBits;
+    
+    // 编译时边界检查和修正
+    if (vectorElements < 1) vectorElements = 1;
+    if (vectorElements > 64) vectorElements = 64;
+    
+    LLVM_DEBUG(llvm::dbgs() << "编译时计算向量元素数: " << userVectorWidth 
+                           << "位 / " << elementSizeBits << "位 = " 
+                           << vectorElements << "个元素\\n");
+    
+    return vectorElements;
+  }
+
+  //===--------------------------------------------------------------------===//
+  // 用户提供的编译时硬件参数 - 确保AffineMap构建正确
+  //===--------------------------------------------------------------------===//
+  
+  const std::string userArchitecture;      // 用户指定的目标架构
+  const int64_t userVectorWidth;           // 用户指定的向量宽度(位)
+  const std::string userVectorExtension;   // 用户指定的向量扩展
+  const bool userEnableFMA;                // 用户指定是否启用FMA
+  const int64_t userTileSize;              // 用户指定的分块大小
 };
 
 } // namespace
@@ -1914,15 +1994,27 @@ public:
     MLIRContext *context = &getContext();
     ModuleOp module = getOperation();
     ConversionTarget target(*context);
+    
+    // 添加合法的方言
     target.addLegalDialect<
         arith::ArithDialect, linalg::LinalgDialect, memref::MemRefDialect,
         VectorDialect, bufferization::BufferizationDialect, math::MathDialect,
-        func::FuncDialect, linalg::LinalgDialect>();
-    target
-        .addIllegalOp<ModuleOp, func::FuncOp, func::ReturnOp, linalg::FillOp>();
+        func::FuncDialect, affine::AffineDialect, scf::SCFDialect>();
+    
+    // 只将linalg.generic标记为非法，需要转换
+    target.addIllegalOp<linalg::GenericOp>();
+    
+    // 保持其他linalg操作合法
+    target.addLegalOp<linalg::FillOp>();
 
     RewritePatternSet patterns(context);
-    patterns.add<LinalgGenericOptimizationPattern>(context);
+    // 将用户提供的硬件参数传递给Pattern
+    patterns.add<LinalgGenericOptimizationPattern>(context,
+                                                   userArchitecture.getValue(),
+                                                   userVectorWidth.getValue(),
+                                                   userVectorExtension.getValue(),
+                                                   userEnableFMA.getValue(),
+                                                   userTileSize.getValue());
 
     if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
       signalPassFailure();
@@ -1932,12 +2024,30 @@ public:
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<linalg::LinalgDialect, arith::ArithDialect, VectorDialect,
                     memref::MemRefDialect, bufferization::BufferizationDialect,
-                    math::MathDialect, func::FuncDialect>();
+                    math::MathDialect, func::FuncDialect, affine::AffineDialect,
+                    scf::SCFDialect>();
   }
 
-  // Option<int64_t> affineVectorSize{*this, "vector-size",
-  //                                  llvm::cl::desc("Affine Vector size."),
-  //                                  llvm::cl::init(16)};
+  // 用户提供的硬件参数选项 - 编译时常量
+  Option<std::string> userArchitecture{*this, "user-arch",
+                                       llvm::cl::desc("Target architecture (x86_64, aarch64, etc.)"),
+                                       llvm::cl::init("x86_64")};
+  
+  Option<int64_t> userVectorWidth{*this, "user-vector-width",
+                                  llvm::cl::desc("Vector width in bits (128, 256, 512)"),
+                                  llvm::cl::init(256)};
+  
+  Option<std::string> userVectorExtension{*this, "user-vector-ext",
+                                          llvm::cl::desc("Vector extension (SSE2, AVX2, AVX512, NEON, SVE)"),
+                                          llvm::cl::init("AVX2")};
+  
+  Option<bool> userEnableFMA{*this, "user-enable-fma",
+                             llvm::cl::desc("Enable FMA instructions"),
+                             llvm::cl::init(false)};
+  
+  Option<int64_t> userTileSize{*this, "user-tile-size",
+                               llvm::cl::desc("Tile size for blocking"),
+                               llvm::cl::init(32)};
 };
 } // namespace
 
