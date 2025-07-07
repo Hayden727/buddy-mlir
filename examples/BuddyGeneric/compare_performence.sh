@@ -24,17 +24,18 @@ OUTPUT2=$(mktemp)
 PROCESSED1=$(mktemp)
 SPEEDUPS=$(mktemp)
 
-# 提取时间数据
+# 提取时间数据（取最后一个匹配的数值，通常是执行时间）
 extract_time() {
     local file="$1"
-    grep -o '[0-9]\+\.[0-9]\+e[-+]\?[0-9]\+\|[0-9]\+\.[0-9]\+' "$file"
+    grep -o '[0-9]\+\.[0-9]\+e[-+]\?[0-9]\+\|[0-9]\+\.[0-9]\+' "$file" | tail -1
 }
 
 # 转换时间为秒
 convert_to_seconds() {
     local time_val="$1"
     if [[ $time_val =~ e ]]; then
-        echo "$time_val" | sed 's/e/*10^/' | bc -l
+        # 使用awk处理科学计数法，bc不能很好处理
+        echo "$time_val" | awk '{printf "%.9f", $1}'
     else
         printf "%.9f" $time_val
     fi
@@ -76,6 +77,13 @@ for ((i=1; i<=$RUNS; i++)); do
     TIME2=$(extract_time "$TEMP_OUT2")
     if [ -n "$TIME2" ]; then
         TIME2=$(convert_to_seconds "$TIME2")
+    fi
+    
+    # 首次运行时显示提取的时间用于调试
+    if [ $i -eq 1 ]; then
+        echo -e "\n${YELLOW}Debug: First run extracted times:${NC}"
+        echo "CMD1 ($CMD1): $TIME1 seconds"
+        echo "CMD2 ($CMD2): $TIME2 seconds"
     fi
     
     # 保存第一次运行的输出用于比较
