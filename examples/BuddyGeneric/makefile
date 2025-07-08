@@ -20,533 +20,205 @@ MTRIPLE := x86_64-apple-darwin
 endif
 
 # ===----------------------------------------------------------------------===//
+# Common Pass Pipeline Definition
+# ===----------------------------------------------------------------------===//
+
+# Define the common MLIR optimization pass pipeline
+MLIR_PASS_PIPELINE := -arith-expand \
+	-eliminate-empty-tensors \
+	-empty-tensor-to-alloc-tensor \
+	-one-shot-bufferize \
+	-func-bufferize \
+	-arith-bufferize \
+	-convert-linalg-to-affine-loops \
+	-affine-loop-fusion \
+	-lower-affine \
+	-convert-vector-to-scf \
+	-expand-strided-metadata \
+	-convert-vector-to-llvm \
+	-memref-expand \
+	-arith-expand \
+	-convert-arith-to-llvm \
+	-finalize-memref-to-llvm \
+	-convert-scf-to-cf \
+	-convert-openmp-to-llvm \
+	-convert-arith-to-llvm \
+	-convert-math-to-llvm \
+	-convert-math-to-libm  \
+	-convert-func-to-llvm \
+	-reconcile-unrealized-casts
+
+# Define common MLIR CPU runner options
+MLIR_CPU_RUNNER_OPTS := ${OPT_FLAG} -e main -entry-point-result=void \
+	-shared-libs=${MLIR_RUNNER_UTILS} \
+	-shared-libs=${MLIR_C_RUNNER_UTILS}
+
+# ===----------------------------------------------------------------------===//
+# Common Test Functions
+# ===----------------------------------------------------------------------===//
+
+# Function to run C++ tests with g++
+define run_cpp_g++_test
+	@${G++_COMPILER} -O3 $(1) -o $(2)
+	@$(2)
+endef
+
+# Function to run C++ tests with clang++
+define run_cpp_clang++_test
+	@${CLANG++_COMPILER} -O3 -march=native -ffast-math $(1) -o $(2)
+	@$(2)
+endef
+
+# Function to run MLIR tests
+define run_mlir_test
+	@${MLIR_OPT} $(1) ${MLIR_PASS_PIPELINE} | \
+	${MLIR_CPU_RUNNER} ${MLIR_CPU_RUNNER_OPTS}
+endef
+
+# ===----------------------------------------------------------------------===//
 # Linalg Generic Optimization Tests
 # ===----------------------------------------------------------------------===//
 
 test-generic-gemm-g++-run:
-	@${G++_COMPILER} -O3 ./GEMM/gemm.cpp -o ./GEMM/gemm_cpp_g++
-	@./GEMM/gemm_cpp_g++
+	$(call run_cpp_g++_test,./GEMM/gemm.cpp,./GEMM/gemm_cpp_g++)
 
 test-generic-gemm-clang++-run:
-	@${CLANG++_COMPILER} -O3 -march=native -ffast-math ./GEMM/gemm.cpp -o ./GEMM/gemm_cpp_clang++
-	@./GEMM/gemm_cpp_clang++
+	$(call run_cpp_clang++_test,./GEMM/gemm.cpp,./GEMM/gemm_cpp_clang++)
 
 test-generic-gemm-run:
-	@${MLIR_OPT} ./GEMM/generic-gemm.mlir \
-		-arith-expand \
-		-eliminate-empty-tensors \
-		-empty-tensor-to-alloc-tensor \
-		-one-shot-bufferize \
-		-func-bufferize \
-		-arith-bufferize \
-		-convert-linalg-to-affine-loops \
-		-affine-loop-fusion \
-		-lower-affine \
-		-convert-vector-to-scf \
-		-expand-strided-metadata \
-		-convert-vector-to-llvm \
-		-memref-expand \
-		-arith-expand \
-		-convert-arith-to-llvm \
-		-finalize-memref-to-llvm \
-		-convert-scf-to-cf \
-		-convert-openmp-to-llvm \
-		-convert-arith-to-llvm \
-		-convert-math-to-llvm \
-		-convert-math-to-libm  \
-		-convert-func-to-llvm \
-		-reconcile-unrealized-casts | \
-	${MLIR_CPU_RUNNER} ${OPT_FLAG} -e main -entry-point-result=void \
-		-shared-libs=${MLIR_RUNNER_UTILS} \
-		-shared-libs=${MLIR_C_RUNNER_UTILS}
+	$(call run_mlir_test,./GEMM/generic-gemm.mlir)
 
 test-generic-gemm-manual-run:
-	@${MLIR_OPT} ./GEMM/generic-gemm-manual.mlir \
-		-arith-expand \
-		-eliminate-empty-tensors \
-		-empty-tensor-to-alloc-tensor \
-		-one-shot-bufferize \
-		-func-bufferize \
-		-arith-bufferize \
-		-convert-linalg-to-affine-loops \
-		-affine-loop-fusion \
-		-lower-affine \
-		-convert-vector-to-scf \
-		-expand-strided-metadata \
-		-convert-vector-to-llvm \
-		-memref-expand \
-		-arith-expand \
-		-convert-arith-to-llvm \
-		-finalize-memref-to-llvm \
-		-convert-scf-to-cf \
-		-convert-openmp-to-llvm \
-		-convert-arith-to-llvm \
-		-convert-math-to-llvm \
-		-convert-math-to-libm  \
-		-convert-func-to-llvm \
-		-reconcile-unrealized-casts | \
-	${MLIR_CPU_RUNNER} ${OPT_FLAG} -e main -entry-point-result=void \
-		-shared-libs=${MLIR_RUNNER_UTILS} \
-		-shared-libs=${MLIR_C_RUNNER_UTILS} 
+	$(call run_mlir_test,./GEMM/generic-gemm-manual.mlir)
 
 test-generic-conv2d-g++-run:
-	@${G++_COMPILER} -O3 ./Conv2D/conv2d.cpp -o ./Conv2D/conv2d_cpp_g++
-	@./Conv2D/conv2d_cpp_g++
+	$(call run_cpp_g++_test,./Conv2D/conv2d.cpp,./Conv2D/conv2d_cpp_g++)
 
 test-generic-conv2d-clang++-run:
-	@${CLANG++_COMPILER} -O3 -march=native -ffast-math ./Conv2D/conv2d.cpp -o ./Conv2D/conv2d_cpp_clang++
-	@./Conv2D/conv2d_cpp_clang++
+	$(call run_cpp_clang++_test,./Conv2D/conv2d.cpp,./Conv2D/conv2d_cpp_clang++)
 
 test-generic-conv2d-run:
-	@${MLIR_OPT} ./Conv2D/generic-conv2D.mlir \
-		-arith-expand \
-		-eliminate-empty-tensors \
-		-empty-tensor-to-alloc-tensor \
-		-one-shot-bufferize \
-		-func-bufferize \
-		-arith-bufferize \
-		-convert-linalg-to-affine-loops \
-		-affine-loop-fusion \
-		-lower-affine \
-		-convert-vector-to-scf \
-		-expand-strided-metadata \
-		-convert-vector-to-llvm \
-		-memref-expand \
-		-arith-expand \
-		-convert-arith-to-llvm \
-		-finalize-memref-to-llvm \
-		-convert-scf-to-cf \
-		-convert-openmp-to-llvm \
-		-convert-arith-to-llvm \
-		-convert-math-to-llvm \
-		-convert-math-to-libm  \
-		-convert-func-to-llvm \
-		-reconcile-unrealized-casts | \
-	${MLIR_CPU_RUNNER} ${OPT_FLAG} -e main -entry-point-result=void \
-		-shared-libs=${MLIR_RUNNER_UTILS} \
-		-shared-libs=${MLIR_C_RUNNER_UTILS}
+	$(call run_mlir_test,./Conv2D/generic-conv2D.mlir)
 
 test-generic-conv2d-manual-run:
-	@${MLIR_OPT} ./Conv2D/generic-conv2D-manual.mlir \
-		-arith-expand \
-		-eliminate-empty-tensors \
-		-empty-tensor-to-alloc-tensor \
-		-one-shot-bufferize \
-		-func-bufferize \
-		-arith-bufferize \
-		-convert-linalg-to-affine-loops \
-		-affine-loop-fusion \
-		-lower-affine \
-		-convert-vector-to-scf \
-		-expand-strided-metadata \
-		-convert-vector-to-llvm \
-		-memref-expand \
-		-arith-expand \
-		-convert-arith-to-llvm \
-		-finalize-memref-to-llvm \
-		-convert-scf-to-cf \
-		-convert-openmp-to-llvm \
-		-convert-arith-to-llvm \
-		-convert-math-to-llvm \
-		-convert-math-to-libm  \
-		-convert-func-to-llvm \
-		-reconcile-unrealized-casts | \
-	${MLIR_CPU_RUNNER} ${OPT_FLAG} -e main -entry-point-result=void \
-		-shared-libs=${MLIR_RUNNER_UTILS} \
-		-shared-libs=${MLIR_C_RUNNER_UTILS}
+	$(call run_mlir_test,./Conv2D/generic-conv2D-manual.mlir)
 
 test-generic-axpy-g++-run:
-	@${G++_COMPILER} -O3 ./AXPY/axpy.cpp -o ./AXPY/axpy_cpp_g++
-	@./AXPY/axpy_cpp_g++
+	$(call run_cpp_g++_test,./AXPY/axpy.cpp,./AXPY/axpy_cpp_g++)
 
 test-generic-axpy-clang++-run:
-	@${CLANG++_COMPILER} -O3 -march=native -ffast-math ./AXPY/axpy.cpp -o ./AXPY/axpy_cpp_clang++
-	@./AXPY/axpy_cpp_clang++
+	$(call run_cpp_clang++_test,./AXPY/axpy.cpp,./AXPY/axpy_cpp_clang++)
 
 test-generic-axpy-run:
-	@${MLIR_OPT} ./AXPY/generic-axpy.mlir \
-		-arith-expand \
-		-eliminate-empty-tensors \
-		-empty-tensor-to-alloc-tensor \
-		-one-shot-bufferize \
-		-func-bufferize \
-		-arith-bufferize \
-		-convert-linalg-to-affine-loops \
-		-affine-loop-fusion \
-		-lower-affine \
-		-convert-vector-to-scf \
-		-expand-strided-metadata \
-		-convert-vector-to-llvm \
-		-memref-expand \
-		-arith-expand \
-		-convert-arith-to-llvm \
-		-finalize-memref-to-llvm \
-		-convert-scf-to-cf \
-		-convert-openmp-to-llvm \
-		-convert-arith-to-llvm \
-		-convert-math-to-llvm \
-		-convert-math-to-libm  \
-		-convert-func-to-llvm \
-		-reconcile-unrealized-casts | \
-	${MLIR_CPU_RUNNER} ${OPT_FLAG} -e main -entry-point-result=void \
-		-shared-libs=${MLIR_RUNNER_UTILS} \
-		-shared-libs=${MLIR_C_RUNNER_UTILS} 
+	$(call run_mlir_test,./AXPY/generic-axpy.mlir)
 
 test-generic-axpy-manual-run:
-	@${MLIR_OPT} ./AXPY/generic-axpy-manual.mlir \
-		-arith-expand \
-		-eliminate-empty-tensors \
-		-empty-tensor-to-alloc-tensor \
-		-one-shot-bufferize \
-		-func-bufferize \
-		-arith-bufferize \
-		-convert-linalg-to-affine-loops \
-		-affine-loop-fusion \
-		-lower-affine \
-		-convert-vector-to-scf \
-		-expand-strided-metadata \
-		-convert-vector-to-llvm \
-		-memref-expand \
-		-arith-expand \
-		-convert-arith-to-llvm \
-		-finalize-memref-to-llvm \
-		-convert-scf-to-cf \
-		-convert-openmp-to-llvm \
-		-convert-arith-to-llvm \
-		-convert-math-to-llvm \
-		-convert-math-to-libm  \
-		-convert-func-to-llvm \
-		-reconcile-unrealized-casts | \
-	${MLIR_CPU_RUNNER} ${OPT_FLAG} -e main -entry-point-result=void \
-		-shared-libs=${MLIR_RUNNER_UTILS} \
-		-shared-libs=${MLIR_C_RUNNER_UTILS} 
+	$(call run_mlir_test,./AXPY/generic-axpy-manual.mlir)
 
 test-generic-dot-product-g++-run:
-	@${G++_COMPILER} -O3 ./Dot_Product/dot-product.cpp -o ./Dot_Product/dot-product_cpp_g++
-	@./Dot_Product/dot-product_cpp_g++
+	$(call run_cpp_g++_test,./Dot_Product/dot-product.cpp,./Dot_Product/dot-product_cpp_g++)
 
 test-generic-dot-product-clang++-run:
-	@${CLANG++_COMPILER} -O3 -march=native -ffast-math ./Dot_Product/dot-product.cpp -o ./Dot_Product/dot-product_cpp_clang++
-	@./Dot_Product/dot-product_cpp_clang++
+	$(call run_cpp_clang++_test,./Dot_Product/dot-product.cpp,./Dot_Product/dot-product_cpp_clang++)
 
 test-generic-dot-product-run:
-	@${MLIR_OPT} ./Dot_Product/generic-dot-product.mlir \
-		-arith-expand \
-		-eliminate-empty-tensors \
-		-empty-tensor-to-alloc-tensor \
-		-one-shot-bufferize \
-		-func-bufferize \
-		-arith-bufferize \
-		-convert-linalg-to-affine-loops \
-		-affine-loop-fusion \
-		-lower-affine \
-		-convert-vector-to-scf \
-		-expand-strided-metadata \
-		-convert-vector-to-llvm \
-		-memref-expand \
-		-arith-expand \
-		-convert-arith-to-llvm \
-		-finalize-memref-to-llvm \
-		-convert-scf-to-cf \
-		-convert-openmp-to-llvm \
-		-convert-arith-to-llvm \
-		-convert-math-to-llvm \
-		-convert-math-to-libm  \
-		-convert-func-to-llvm \
-		-reconcile-unrealized-casts | \
-	${MLIR_CPU_RUNNER} ${OPT_FLAG} -e main -entry-point-result=void \
-		-shared-libs=${MLIR_RUNNER_UTILS} \
-		-shared-libs=${MLIR_C_RUNNER_UTILS} 
+	$(call run_mlir_test,./Dot_Product/generic-dot-product.mlir)
 
 test-generic-dot-product-manual-run:
-	@${MLIR_OPT} ./Dot_Product/generic-dot-product-manual.mlir \
-		-arith-expand \
-		-eliminate-empty-tensors \
-		-empty-tensor-to-alloc-tensor \
-		-one-shot-bufferize \
-		-func-bufferize \
-		-arith-bufferize \
-		-convert-linalg-to-affine-loops \
-		-affine-loop-fusion \
-		-lower-affine \
-		-convert-vector-to-scf \
-		-expand-strided-metadata \
-		-convert-vector-to-llvm \
-		-memref-expand \
-		-arith-expand \
-		-convert-arith-to-llvm \
-		-finalize-memref-to-llvm \
-		-convert-scf-to-cf \
-		-convert-openmp-to-llvm \
-		-convert-arith-to-llvm \
-		-convert-math-to-llvm \
-		-convert-math-to-libm  \
-		-convert-func-to-llvm \
-		-reconcile-unrealized-casts | \
-	${MLIR_CPU_RUNNER} ${OPT_FLAG} -e main -entry-point-result=void \
-		-shared-libs=${MLIR_RUNNER_UTILS} \
-		-shared-libs=${MLIR_C_RUNNER_UTILS} 
+	$(call run_mlir_test,./Dot_Product/generic-dot-product-manual.mlir)
 
 test-generic-batch-mat-vec-g++-run:
-	@${G++_COMPILER} -O3 ./Batch_Matmul/batch-mat-vec.cpp -o ./Batch_Matmul/batch-mat-vec_cpp_g++
-	@./Batch_Matmul/batch-mat-vec_cpp_g++
+	$(call run_cpp_g++_test,./Batch_Matmul/batch-mat-vec.cpp,./Batch_Matmul/batch-mat-vec_cpp_g++)
 
 test-generic-batch-mat-vec-clang++-run:
-	@${CLANG++_COMPILER} -O3 -march=native -ffast-math ./Batch_Matmul/batch-mat-vec.cpp -o ./Batch_Matmul/batch-mat-vec_cpp_clang++
-	@./Batch_Matmul/batch-mat-vec_cpp_clang++
+	$(call run_cpp_clang++_test,./Batch_Matmul/batch-mat-vec.cpp,./Batch_Matmul/batch-mat-vec_cpp_clang++)
 
 test-generic-batch-mat-vec-run:
-	@${MLIR_OPT} ./Batch_Matmul/generic-batch-mat-vec.mlir \
-		-arith-expand \
-		-eliminate-empty-tensors \
-		-empty-tensor-to-alloc-tensor \
-		-one-shot-bufferize \
-		-func-bufferize \
-		-arith-bufferize \
-		-convert-linalg-to-affine-loops \
-		-affine-loop-fusion \
-		-lower-affine \
-		-convert-vector-to-scf \
-		-expand-strided-metadata \
-		-convert-vector-to-llvm \
-		-memref-expand \
-		-arith-expand \
-		-convert-arith-to-llvm \
-		-finalize-memref-to-llvm \
-		-convert-scf-to-cf \
-		-convert-openmp-to-llvm \
-		-convert-arith-to-llvm \
-		-convert-math-to-llvm \
-		-convert-math-to-libm  \
-		-convert-func-to-llvm \
-		-reconcile-unrealized-casts | \
-	${MLIR_CPU_RUNNER} ${OPT_FLAG} -e main -entry-point-result=void \
-		-shared-libs=${MLIR_RUNNER_UTILS} \
-		-shared-libs=${MLIR_C_RUNNER_UTILS} 
+	$(call run_mlir_test,./Batch_Matmul/generic-batch-mat-vec.mlir)
 
 test-generic-batch-mat-vec-manual-run:
-	@${MLIR_OPT} ./Batch_Matmul/generic-batch-mat-vec-manual.mlir \
-		-arith-expand \
-		-eliminate-empty-tensors \
-		-empty-tensor-to-alloc-tensor \
-		-one-shot-bufferize \
-		-func-bufferize \
-		-arith-bufferize \
-		-convert-linalg-to-affine-loops \
-		-affine-loop-fusion \
-		-lower-affine \
-		-convert-vector-to-scf \
-		-expand-strided-metadata \
-		-convert-vector-to-llvm \
-		-memref-expand \
-		-arith-expand \
-		-convert-arith-to-llvm \
-		-finalize-memref-to-llvm \
-		-convert-scf-to-cf \
-		-convert-openmp-to-llvm \
-		-convert-arith-to-llvm \
-		-convert-math-to-llvm \
-		-convert-math-to-libm  \
-		-convert-func-to-llvm \
-		-reconcile-unrealized-casts | \
-	${MLIR_CPU_RUNNER} ${OPT_FLAG} -e main -entry-point-result=void \
-		-shared-libs=${MLIR_RUNNER_UTILS} \
-		-shared-libs=${MLIR_C_RUNNER_UTILS} 
+	$(call run_mlir_test,./Batch_Matmul/generic-batch-mat-vec-manual.mlir)
 
 test-generic-outer-product-g++-run:
-	@${G++_COMPILER} -O3 ./Outer_Product/outer-product.cpp -o ./Outer_Product/outer-product_cpp_g++
-	@./Outer_Product/outer-product_cpp_g++
+	$(call run_cpp_g++_test,./Outer_Product/outer-product.cpp,./Outer_Product/outer-product_cpp_g++)
 
 test-generic-outer-product-clang++-run:
-	@${CLANG++_COMPILER} -O3 -march=native -ffast-math ./Outer_Product/outer-product.cpp -o ./Outer_Product/outer-product_cpp_clang++
-	@./Outer_Product/outer-product_cpp_clang++
+	$(call run_cpp_clang++_test,./Outer_Product/outer-product.cpp,./Outer_Product/outer-product_cpp_clang++)
 
 test-generic-outer-product-run:
-	@${MLIR_OPT} ./Outer_Product/generic-outer-product.mlir \
-		-arith-expand \
-		-eliminate-empty-tensors \
-		-empty-tensor-to-alloc-tensor \
-		-one-shot-bufferize \
-		-func-bufferize \
-		-arith-bufferize \
-		-convert-linalg-to-affine-loops \
-		-affine-loop-fusion \
-		-lower-affine \
-		-convert-vector-to-scf \
-		-expand-strided-metadata \
-		-convert-vector-to-llvm \
-		-memref-expand \
-		-arith-expand \
-		-convert-arith-to-llvm \
-		-finalize-memref-to-llvm \
-		-convert-scf-to-cf \
-		-convert-openmp-to-llvm \
-		-convert-arith-to-llvm \
-		-convert-math-to-llvm \
-		-convert-math-to-libm  \
-		-convert-func-to-llvm \
-		-reconcile-unrealized-casts | \
-	${MLIR_CPU_RUNNER} ${OPT_FLAG} -e main -entry-point-result=void \
-		-shared-libs=${MLIR_RUNNER_UTILS} \
-		-shared-libs=${MLIR_C_RUNNER_UTILS} 
+	$(call run_mlir_test,./Outer_Product/generic-outer-product.mlir)
 
 test-generic-outer-product-manual-run:
-	@${MLIR_OPT} ./Outer_Product/generic-outer-product-manual.mlir \
-		-arith-expand \
-		-eliminate-empty-tensors \
-		-empty-tensor-to-alloc-tensor \
-		-one-shot-bufferize \
-		-func-bufferize \
-		-arith-bufferize \
-		-convert-linalg-to-affine-loops \
-		-affine-loop-fusion \
-		-lower-affine \
-		-convert-vector-to-scf \
-		-expand-strided-metadata \
-		-convert-vector-to-llvm \
-		-memref-expand \
-		-arith-expand \
-		-convert-arith-to-llvm \
-		-finalize-memref-to-llvm \
-		-convert-scf-to-cf \
-		-convert-openmp-to-llvm \
-		-convert-arith-to-llvm \
-		-convert-math-to-llvm \
-		-convert-math-to-libm  \
-		-convert-func-to-llvm \
-		-reconcile-unrealized-casts | \
-	${MLIR_CPU_RUNNER} ${OPT_FLAG} -e main -entry-point-result=void \
-		-shared-libs=${MLIR_RUNNER_UTILS} \
-		-shared-libs=${MLIR_C_RUNNER_UTILS} 
+	$(call run_mlir_test,./Outer_Product/generic-outer-product-manual.mlir)
 
 test-generic-softmax-g++-run:
-	@${G++_COMPILER} -O3 ./Softmax/softmax.cpp -o ./Softmax/softmax_cpp_g++
-	@./Softmax/softmax_cpp_g++
+	$(call run_cpp_g++_test,./Softmax/softmax.cpp,./Softmax/softmax_cpp_g++)
 
 test-generic-softmax-clang++-run:
-	@${CLANG++_COMPILER} -O3 -march=native -ffast-math ./Softmax/softmax.cpp -o ./Softmax/softmax_cpp_clang++
-	@./Softmax/softmax_cpp_clang++
+	$(call run_cpp_clang++_test,./Softmax/softmax.cpp,./Softmax/softmax_cpp_clang++)
 
 test-generic-softmax-run:
-	@${MLIR_OPT} ./Softmax/generic-softmax.mlir \
-		-arith-expand \
-		-eliminate-empty-tensors \
-		-empty-tensor-to-alloc-tensor \
-		-one-shot-bufferize \
-		-func-bufferize \
-		-arith-bufferize \
-		-convert-linalg-to-affine-loops \
-		-affine-loop-fusion \
-		-lower-affine \
-		-convert-vector-to-scf \
-		-expand-strided-metadata \
-		-convert-vector-to-llvm \
-		-memref-expand \
-		-arith-expand \
-		-convert-arith-to-llvm \
-		-finalize-memref-to-llvm \
-		-convert-scf-to-cf \
-		-convert-openmp-to-llvm \
-		-convert-arith-to-llvm \
-		-convert-math-to-llvm \
-		-convert-math-to-libm  \
-		-convert-func-to-llvm \
-		-reconcile-unrealized-casts | \
-	${MLIR_CPU_RUNNER} ${OPT_FLAG} -e main -entry-point-result=void \
-		-shared-libs=${MLIR_RUNNER_UTILS} \
-		-shared-libs=${MLIR_C_RUNNER_UTILS} 
+	$(call run_mlir_test,./Softmax/generic-softmax.mlir)
 
 test-generic-softmax-manual-run:
-	@${MLIR_OPT} ./Softmax/generic-softmax-manual.mlir \
-		-arith-expand \
-		-eliminate-empty-tensors \
-		-empty-tensor-to-alloc-tensor \
-		-one-shot-bufferize \
-		-func-bufferize \
-		-arith-bufferize \
-		-convert-linalg-to-affine-loops \
-		-affine-loop-fusion \
-		-lower-affine \
-		-convert-vector-to-scf \
-		-expand-strided-metadata \
-		-convert-vector-to-llvm \
-		-memref-expand \
-		-arith-expand \
-		-convert-arith-to-llvm \
-		-finalize-memref-to-llvm \
-		-convert-scf-to-cf \
-		-convert-openmp-to-llvm \
-		-convert-arith-to-llvm \
-		-convert-math-to-llvm \
-		-convert-math-to-libm  \
-		-convert-func-to-llvm \
-		-reconcile-unrealized-casts | \
-	${MLIR_CPU_RUNNER} ${OPT_FLAG} -e main -entry-point-result=void \
-		-shared-libs=${MLIR_RUNNER_UTILS} \
-		-shared-libs=${MLIR_C_RUNNER_UTILS} 
+	$(call run_mlir_test,./Softmax/generic-softmax-manual.mlir)
 
 test-generic-batch-gemm-g++-run:
-	@${G++_COMPILER} -O3 ./Batch_GEMM/batch-gemm.cpp -o ./Batch_GEMM/batch-gemm_cpp_g++
-	@./Batch_GEMM/batch-gemm_cpp_g++
+	$(call run_cpp_g++_test,./Batch_GEMM/batch-gemm.cpp,./Batch_GEMM/batch-gemm_cpp_g++)
 
 test-generic-batch-gemm-clang++-run:
-	@${CLANG++_COMPILER} -O3 -march=native -ffast-math ./Batch_GEMM/batch-gemm.cpp -o ./Batch_GEMM/batch-gemm_cpp_clang++
-	@./Batch_GEMM/batch-gemm_cpp_clang++
+	$(call run_cpp_clang++_test,./Batch_GEMM/batch-gemm.cpp,./Batch_GEMM/batch-gemm_cpp_clang++)
 
 test-generic-batch-gemm-run:
-	@${MLIR_OPT} ./Batch_GEMM/generic-batch-gemm.mlir \
-		-arith-expand \
-		-eliminate-empty-tensors \
-		-empty-tensor-to-alloc-tensor \
-		-one-shot-bufferize \
-		-func-bufferize \
-		-arith-bufferize \
-		-convert-linalg-to-affine-loops \
-		-affine-loop-fusion \
-		-lower-affine \
-		-convert-vector-to-scf \
-		-expand-strided-metadata \
-		-convert-vector-to-llvm \
-		-memref-expand \
-		-arith-expand \
-		-convert-arith-to-llvm \
-		-finalize-memref-to-llvm \
-		-convert-scf-to-cf \
-		-convert-openmp-to-llvm \
-		-convert-arith-to-llvm \
-		-convert-math-to-llvm \
-		-convert-math-to-libm  \
-		-convert-func-to-llvm \
-		-reconcile-unrealized-casts | \
-	${MLIR_CPU_RUNNER} ${OPT_FLAG} -e main -entry-point-result=void \
-		-shared-libs=${MLIR_RUNNER_UTILS} \
-		-shared-libs=${MLIR_C_RUNNER_UTILS} 
+	$(call run_mlir_test,./Batch_GEMM/generic-batch-gemm.mlir)
 
 test-generic-batch-gemm-manual-run:
-	@${MLIR_OPT} ./Batch_GEMM/generic-batch-gemm-manual.mlir \
-		-arith-expand \
-		-eliminate-empty-tensors \
-		-empty-tensor-to-alloc-tensor \
-		-one-shot-bufferize \
-		-func-bufferize \
-		-arith-bufferize \
-		-convert-linalg-to-affine-loops \
-		-affine-loop-fusion \
-		-lower-affine \
-		-convert-vector-to-scf \
-		-expand-strided-metadata \
-		-convert-vector-to-llvm \
-		-memref-expand \
-		-arith-expand \
-		-convert-arith-to-llvm \
-		-finalize-memref-to-llvm \
-		-convert-scf-to-cf \
-		-convert-openmp-to-llvm \
-		-convert-arith-to-llvm \
-		-convert-math-to-llvm \
-		-convert-math-to-libm  \
-		-convert-func-to-llvm \
-		-reconcile-unrealized-casts | \
-	${MLIR_CPU_RUNNER} ${OPT_FLAG} -e main -entry-point-result=void \
-		-shared-libs=${MLIR_RUNNER_UTILS} \
-		-shared-libs=${MLIR_C_RUNNER_UTILS} 
+	$(call run_mlir_test,./Batch_GEMM/generic-batch-gemm-manual.mlir)
+
+test-generic-gemm-s-g++-run:
+	$(call run_cpp_g++_test,./GEMM/gemm-S.cpp,./GEMM/gemm-S_cpp_g++)
+
+test-generic-gemm-s-clang++-run:
+	$(call run_cpp_clang++_test,./GEMM/gemm-S.cpp,./GEMM/gemm-S_cpp_clang++)
+
+test-generic-gemm-s-run:
+	$(call run_mlir_test,./GEMM/generic-gemm-S.mlir)
+
+test-generic-gemm-s-manual-run:
+	$(call run_mlir_test,./GEMM/generic-gemm-S-manual.mlir)
+
+test-generic-gemm-l-g++-run:
+	$(call run_cpp_g++_test,./GEMM/gemm-L.cpp,./GEMM/gemm-L_cpp_g++)
+
+test-generic-gemm-l-clang++-run:
+	$(call run_cpp_clang++_test,./GEMM/gemm-L.cpp,./GEMM/gemm-L_cpp_clang++)
+
+test-generic-gemm-l-run:
+	$(call run_mlir_test,./GEMM/generic-gemm-L.mlir)
+
+test-generic-gemm-l-manual-run:
+	$(call run_mlir_test,./GEMM/generic-gemm-L-manual.mlir)
+
+test-generic-gemm-tiny-g++-run:
+	$(call run_cpp_g++_test,./GEMM/gemm-tiny.cpp,./GEMM/gemm-tiny_cpp_g++)
+
+test-generic-gemm-tiny-clang++-run:
+	$(call run_cpp_clang++_test,./GEMM/gemm-tiny.cpp,./GEMM/gemm-tiny_cpp_clang++)
+
+test-generic-gemm-tiny-run:
+	$(call run_mlir_test,./GEMM/generic-gemm-tiny.mlir)
+
+test-generic-gemm-tiny-manual-run:
+	$(call run_mlir_test,./GEMM/generic-gemm-tiny-manual.mlir)
+
+test-generic-gemm-ml-g++-run:
+	$(call run_cpp_g++_test,./GEMM/gemm-ML.cpp,./GEMM/gemm-ML_cpp_g++)
+
+test-generic-gemm-ml-clang++-run:
+	$(call run_cpp_clang++_test,./GEMM/gemm-ML.cpp,./GEMM/gemm-ML_cpp_clang++)
+
+test-generic-gemm-ml-run:
+	$(call run_mlir_test,./GEMM/generic-gemm-ML.mlir)
+
+test-generic-gemm-ml-manual-run:
+	$(call run_mlir_test,./GEMM/generic-gemm-ML-manual.mlir)
