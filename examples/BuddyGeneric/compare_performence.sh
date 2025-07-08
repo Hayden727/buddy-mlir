@@ -88,8 +88,12 @@ for ((i=1; i<=$RUNS; i++)); do
     
     # 保存第一次运行的输出用于比较
     if [ $i -eq 1 ]; then
-        grep "data =" "$TEMP_OUT1" | sed 's/base@ = [^[:space:]]*/base@ = <addr>/g' > "$PROCESSED1"
-        grep "data =" "$TEMP_OUT2" | sed 's/base@ = [^[:space:]]*/base@ = <addr>/g' > "$OUTPUT2"
+        # 只提取 data = 后面的实际数据内容，排除最后一行的时间数值
+        grep "data =" "$TEMP_OUT1" | sed 's/.*data = //' > "$PROCESSED1"
+        grep "data =" "$TEMP_OUT2" | sed 's/.*data = //' > "$OUTPUT2"
+        # 移除最后一行（时间信息）
+        sed -i '$d' "$PROCESSED1"
+        sed -i '$d' "$OUTPUT2"
     fi
     
     # 计算这次运行的加速比
