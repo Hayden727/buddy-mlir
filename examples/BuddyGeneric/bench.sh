@@ -4,7 +4,7 @@
 > result.log
 
 # 运行所有算子测试并保存结果
-echo "Running all operator benchmarks..." | tee result.log
+# echo "Running all operator benchmarks..." | tee result.log
 
 # 使用tee命令同时输出到终端和文件
 ./compare_performence.sh gemm 2>&1 | tee -a result.log

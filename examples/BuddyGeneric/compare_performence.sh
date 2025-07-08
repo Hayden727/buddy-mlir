@@ -16,7 +16,7 @@ if [ $# -ne 1 ]; then
 fi
 
 OPERATOR="$1"
-RUNS=10
+RUNS=100
 
 # 构建4个命令名称
 CMD_GPP="test-generic-${OPERATOR}-g++-run"
