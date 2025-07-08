@@ -484,3 +484,69 @@ test-generic-softmax-manual-run:
 	${MLIR_CPU_RUNNER} ${OPT_FLAG} -e main -entry-point-result=void \
 		-shared-libs=${MLIR_RUNNER_UTILS} \
 		-shared-libs=${MLIR_C_RUNNER_UTILS} 
+
+test-generic-batch-gemm-g++-run:
+	@${G++_COMPILER} -O3 ./Batch_GEMM/batch-gemm.cpp -o ./Batch_GEMM/batch-gemm_cpp_g++
+	@./Batch_GEMM/batch-gemm_cpp_g++
+
+test-generic-batch-gemm-clang++-run:
+	@${CLANG++_COMPILER} -O3 -march=native -ffast-math ./Batch_GEMM/batch-gemm.cpp -o ./Batch_GEMM/batch-gemm_cpp_clang++
+	@./Batch_GEMM/batch-gemm_cpp_clang++
+
+test-generic-batch-gemm-run:
+	@${MLIR_OPT} ./Batch_GEMM/generic-batch-gemm.mlir \
+		-arith-expand \
+		-eliminate-empty-tensors \
+		-empty-tensor-to-alloc-tensor \
+		-one-shot-bufferize \
+		-func-bufferize \
+		-arith-bufferize \
+		-convert-linalg-to-affine-loops \
+		-affine-loop-fusion \
+		-lower-affine \
+		-convert-vector-to-scf \
+		-expand-strided-metadata \
+		-convert-vector-to-llvm \
+		-memref-expand \
+		-arith-expand \
+		-convert-arith-to-llvm \
+		-finalize-memref-to-llvm \
+		-convert-scf-to-cf \
+		-convert-openmp-to-llvm \
+		-convert-arith-to-llvm \
+		-convert-math-to-llvm \
+		-convert-math-to-libm  \
+		-convert-func-to-llvm \
+		-reconcile-unrealized-casts | \
+	${MLIR_CPU_RUNNER} ${OPT_FLAG} -e main -entry-point-result=void \
+		-shared-libs=${MLIR_RUNNER_UTILS} \
+		-shared-libs=${MLIR_C_RUNNER_UTILS} 
+
+test-generic-batch-gemm-manual-run:
+	@${MLIR_OPT} ./Batch_GEMM/generic-batch-gemm-manual.mlir \
+		-arith-expand \
+		-eliminate-empty-tensors \
+		-empty-tensor-to-alloc-tensor \
+		-one-shot-bufferize \
+		-func-bufferize \
+		-arith-bufferize \
+		-convert-linalg-to-affine-loops \
+		-affine-loop-fusion \
+		-lower-affine \
+		-convert-vector-to-scf \
+		-expand-strided-metadata \
+		-convert-vector-to-llvm \
+		-memref-expand \
+		-arith-expand \
+		-convert-arith-to-llvm \
+		-finalize-memref-to-llvm \
+		-convert-scf-to-cf \
+		-convert-openmp-to-llvm \
+		-convert-arith-to-llvm \
+		-convert-math-to-llvm \
+		-convert-math-to-libm  \
+		-convert-func-to-llvm \
+		-reconcile-unrealized-casts | \
+	${MLIR_CPU_RUNNER} ${OPT_FLAG} -e main -entry-point-result=void \
+		-shared-libs=${MLIR_RUNNER_UTILS} \
+		-shared-libs=${MLIR_C_RUNNER_UTILS} 

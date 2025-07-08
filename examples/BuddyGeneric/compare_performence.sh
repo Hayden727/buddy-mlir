@@ -11,7 +11,7 @@ BLUE='\033[0;34m'
 if [ $# -ne 1 ]; then
     echo -e "${YELLOW}Usage: $0 <operator_name>${NC}"
     echo "Example: $0 'gemm' or $0 'conv2d' or $0 'axpy'"
-    echo "Available operators: gemm, conv2d, axpy, dot-product, batch-mat-vec, outer-product, softmax"
+    echo "Available operators: gemm, conv2d, axpy, dot-product, batch-mat-vec, batch-gemm, outer-product, softmax"
     exit 1
 fi
 
